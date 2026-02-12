@@ -824,8 +824,6 @@ async function onStartMatch() {
     </main>
   );
 }
-  );
-}
 
 export default function PlayPage() {
   return (
