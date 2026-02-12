@@ -3,35 +3,20 @@ import Link from "next/link";
 
 export default function HomePage() {
   return (
-    <main className="min-h-screen bg-black text-white">
-      <div className="mx-auto max-w-xl px-6 py-12">
-        <h1 className="text-2xl font-semibold">Reaction Tap</h1>
-        <p className="mt-2 text-white/70">
-          MVP build. Go to lobby and create / join a match.
-        </p>
+    <main style={{ padding: 24, fontFamily: "system-ui" }}>
+      <h1 style={{ fontSize: 28, fontWeight: 700, marginBottom: 8 }}>
+        Reaction Tap
+      </h1>
 
-        <div className="mt-6 flex flex-wrap gap-3">
-          <Link
-            href="/lobby"
-            className="rounded-xl bg-white px-4 py-2 text-sm font-medium text-black"
-          >
-            Open Lobby
-          </Link>
+      <p style={{ opacity: 0.8, marginBottom: 16 }}>
+        MVP: lobby → play → wallet → cashout admin
+      </p>
 
-          <Link
-            href="/wallet"
-            className="rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-sm font-medium text-white/90"
-          >
-            Wallet
-          </Link>
-
-          <Link
-            href="/cashout-admin"
-            className="rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-sm font-medium text-white/90"
-          >
-            Cashout Admin
-          </Link>
-        </div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <Link href="/lobby">Go to Lobby</Link>
+        <Link href="/play">Play</Link>
+        <Link href="/wallet">Wallet</Link>
+        <Link href="/cashout-admin">Cashout Admin</Link>
       </div>
     </main>
   );
