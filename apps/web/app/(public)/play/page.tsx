@@ -2,7 +2,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import GameCanvas from "@/components/game/GameCanvas";
 import { apiStartMatch } from "@/lib/matchApi";
@@ -33,7 +33,7 @@ function ensureTabPlayerId(): string {
 }
 
 
-export default function PlayPage() {
+function PlayInner() {
   const router = useRouter();
   const sp = useSearchParams();
 
@@ -824,4 +824,16 @@ async function onStartMatch() {
     </main>
   );
 }
+  );
+}
+
+export default function PlayPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-black text-white p-6">Loading…</div>}>
+      <PlayInner />
+    </Suspense>
+  );
+}
+// ===== FILE END: apps/web/app/(public)/play/page.tsx =====
+
 // ===== FILE END: apps/web/app/(public)/play/page.tsx =====
