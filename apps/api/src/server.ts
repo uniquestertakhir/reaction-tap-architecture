@@ -1,4 +1,5 @@
 // ===== FILE START: apps/api/src/server.ts =====
+// ===== REPLACE START: imports =====
 import Fastify from "fastify";
 
 import { verifyRun, storeVerifiedRun, getRunsByMatch, getBestScoreByMatch, getBestRunByMatch } from "./services/game.service.js";
@@ -13,6 +14,10 @@ import {
   checkCashoutAdminToken,
 } from "./services/cashout.service.js";
 
+// ✅ NEW: matchmaking routes
+import { registerMatchmakingRoutes } from "./routes/matchmaking.js";
+// ===== REPLACE END: imports =====
+
 
 
 
@@ -23,11 +28,20 @@ console.log("BOOT SERVER FILE:", import.meta.url);
 // timers for auto-ending matches (in-memory)
 const matchEndTimers = new Map<string, any>();
 
-
 async function main() {
   const app = Fastify({ logger: true });
 
   app.get("/health", async () => ({ ok: true }));
+  
+    
+  // ===== REPLACE START: matchmaking routes =====
+  await registerMatchmakingRoutes(app);
+
+  // ✅ debug: show registered routes
+  try {
+    app.log.info("\n" + app.printRoutes());
+  } catch {}
+// ===== REPLACE END: matchmaking routes =====
 
 
    // ---- wallet ----

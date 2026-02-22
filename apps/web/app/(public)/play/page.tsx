@@ -2,13 +2,13 @@
 "use client";
 
 import Link from "next/link";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import GameCanvas from "@/components/game/GameCanvas";
 import { apiStartMatch } from "@/lib/matchApi";
 
 type MatchStatus = "none" | "created" | "started" | "ended" | "error";
-const GAME_ID = "reaction-tap";
+const DEFAULT_GAME_ID = "reaction-tap";
 
 // same key as GameCanvas
 const TAB_PLAYER_KEY = "rt_tab_player_id_v1";
@@ -32,14 +32,155 @@ function ensureTabPlayerId(): string {
   }
 }
 
+function numOrNull(v: string | null) {
+  if (!v) return null;
+  const n = Number(String(v).trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+async function createMatch(gameId: string) {
+  const r = await fetch("/api/match/create", {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ gameId }),
+  });
+  const j = await r.json().catch(() => null);
+  const id = String(j?.match?.id || j?.id || "").trim();
+  if (!r.ok || !id) {
+    return { ok: false as const, status: r.status, error: j?.error || "create_match_failed", raw: j };
+  }
+  return { ok: true as const, id, raw: j };
+}
+
+async function stakeMatch(matchId: string, playerId: string, amount: number, gameId: string) {
+  const r = await fetch(`/api/match/${encodeURIComponent(matchId)}/stake`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json" },
+    body: JSON.stringify({ playerId, amount, currency: "USD", gameId }),
+  });
+  const j = await r.json().catch(() => null);
+  if (!r.ok || j?.ok === false) {
+    return { ok: false as const, status: r.status, error: j?.error || j?.reason || "stake_failed", raw: j };
+  }
+  return { ok: true as const, match: j?.match, wallet: j?.wallet, raw: j };
+}
 
 function PlayInner() {
   const router = useRouter();
   const sp = useSearchParams();
 
+  // ===== query =====
   const matchId = (sp.get("matchId") || "").trim();
 
+  const gameId = (sp.get("gameId") || DEFAULT_GAME_ID).trim() || DEFAULT_GAME_ID;
+  const mode = (sp.get("mode") || "").trim().toLowerCase();
+
+  // For auto-match we pass:
+  // /play?gameId=reaction-tap&mode=starter-brawl&currency=usd&entry=0.3&returnTo=/games/reaction-tap
+  const currency = (sp.get("currency") || "usd").trim().toLowerCase();
+  const entry = numOrNull(sp.get("entry"));
+  const returnToRaw = (sp.get("returnTo") || "").trim();
+  const returnTo = returnToRaw.startsWith("/") && !returnToRaw.startsWith("//") ? returnToRaw : "/games";
+
+  const isSolo = mode === "solo";
+
+  const isAutoMatch = !matchId && !isSolo && currency === "usd" && typeof entry === "number" && entry > 0;
+
+  // ✅ playerId of this tab (same as GameCanvas)
+  const [playerId, setPlayerId] = useState<string>("");
+  useEffect(() => {
+    const pid = ensureTabPlayerId();
+    setPlayerId(pid);
+  }, []);
+
+  // ===== state =====
   const [isHost, setIsHost] = useState(false);
+
+  const [matchStatus, setMatchStatus] = useState<MatchStatus>(matchId ? "created" : "none");
+  const [startError, setStartError] = useState<string | null>(null);
+
+  // ✅ wallet + match info
+  const [wallet, setWallet] = useState<any>(null);
+  const [walletErr, setWalletErr] = useState<string | null>(null);
+
+  const [matchInfo, setMatchInfo] = useState<any>(null);
+  const [matchErr, setMatchErr] = useState<string | null>(null);
+
+  const [busy, setBusy] = useState<string | null>(null);
+
+  // ✅ cashout (withdraw) UI (DEV)
+  const [withdrawAmount, setWithdrawAmount] = useState<string>("1");
+  const [cashoutBusy, setCashoutBusy] = useState(false);
+  const [lastCashout, setLastCashout] = useState<any>(null);
+  const [cashoutErr, setCashoutErr] = useState<string | null>(null);
+
+  // ✅ stake UI (DEV)
+  const [stakeAmount, setStakeAmount] = useState<string>("10");
+
+  // ✅ cashout list for this player
+  const [cashouts, setCashouts] = useState<any[]>([]);
+  const [cashoutsErr, setCashoutsErr] = useState<string | null>(null);
+
+  // ===== IMPORTANT: If no matchId and not autoMatch => go back =====
+useEffect(() => {
+  if (matchId) return;
+  if (isAutoMatch) return;
+
+  // ✅ Solo/Practice можно открывать без matchId — НЕ уводим в /games
+  if (isSolo) return;
+
+  // if user opened /play напрямую — уводим в games (не lobby)
+  router.replace("/games");
+}, [matchId, isAutoMatch, isSolo, router]);
+
+  // ===== AUTO MATCH BOOTSTRAP =====
+  const bootRef = useRef(false);
+
+  useEffect(() => {
+    if (!isAutoMatch) return;
+    if (!playerId) return;
+    if (bootRef.current) return;
+
+    bootRef.current = true;
+
+    (async () => {
+      setStartError(null);
+
+      // 1) create match
+      const created = await createMatch(gameId);
+      if (!created.ok) {
+        console.error("[AUTO MATCH] create failed", created);
+        setStartError(`Auto-match failed: create (${created.status}) ${created.error}`);
+        return;
+      }
+
+      const id = created.id;
+
+      // mark host for this tab (optional)
+      try {
+        localStorage.setItem("rt_match_host_v1", id);
+      } catch {}
+
+      // 2) stake immediately (YOUR stake)
+      const st = await stakeMatch(id, playerId, entry!, gameId);
+      if (!st.ok) {
+        console.error("[AUTO MATCH] stake failed", st);
+        setStartError(`Auto-match failed: stake (${st.status}) ${st.error}`);
+        // still allow user to see match page for debugging
+        router.replace(`/play?matchId=${encodeURIComponent(id)}&mode=${encodeURIComponent(mode)}&gameId=${encodeURIComponent(gameId)}&returnTo=${encodeURIComponent(returnTo)}`);
+        return;
+      }
+
+      // 3) go to /play?matchId=...
+      router.replace(
+        `/play?matchId=${encodeURIComponent(id)}&mode=${encodeURIComponent(mode)}&gameId=${encodeURIComponent(
+          gameId
+        )}&returnTo=${encodeURIComponent(returnTo)}`
+      );
+    })();
+  }, [isAutoMatch, playerId, gameId, mode, entry, router, returnTo]);
+
+  // ===== host flag (for matchId flow) =====
   useEffect(() => {
     if (!matchId) {
       setIsHost(false);
@@ -52,53 +193,31 @@ function PlayInner() {
     }
   }, [matchId]);
 
-  const [matchStatus, setMatchStatus] = useState<MatchStatus>(matchId ? "created" : "none");
-  const [startError, setStartError] = useState<string | null>(null);
+  // ===== SOLO MODE: PRACTICE (NO CASH / NO AUTO-STAKE) =====
+// В solo/practice мы НЕ трогаем wallet/escrow и НЕ стартуем матч.
+// GameCanvas может работать без matchId (practice).
+const soloBootRef = useRef(false);
 
-  // ✅ playerId of this tab (same as GameCanvas)
-  const [playerId, setPlayerId] = useState<string>("");
+useEffect(() => {
+  if (!isSolo) return;
 
-    useEffect(() => {
-    const pid = ensureTabPlayerId();
-    setPlayerId(pid);
-  }, []);
+  // reset guard when switching into solo
+  if (!soloBootRef.current) soloBootRef.current = true;
 
+  // intentionally no-op
+}, [isSolo]);
 
-  // ✅ wallet + match money info
-    const [wallet, setWallet] = useState<any>(null);
-  const [walletErr, setWalletErr] = useState<string | null>(null);
-
-  const [matchInfo, setMatchInfo] = useState<any>(null);
-  const [matchErr, setMatchErr] = useState<string | null>(null);
-
-  const [busy, setBusy] = useState<string | null>(null);
-      // ✅ cashout (withdraw) UI (DEV)
-  const [withdrawAmount, setWithdrawAmount] = useState<string>("1");
-  const [cashoutBusy, setCashoutBusy] = useState(false);
-  const [lastCashout, setLastCashout] = useState<any>(null);
-  const [cashoutErr, setCashoutErr] = useState<string | null>(null);
-    // ✅ stake UI
-  const [stakeAmount, setStakeAmount] = useState<string>("10");
-
-
-
-  // ✅ cashout list for this player
-  const [cashouts, setCashouts] = useState<any[]>([]);
-  const [cashoutsErr, setCashoutsErr] = useState<string | null>(null);
-
-
-
-
+  // ===== label =====
   const label = useMemo(() => {
-    if (!matchId) return "match: none";
+    if (!matchId) return isAutoMatch ? "match: searching…" : "match: none";
     if (matchStatus === "created") return "match: created";
     if (matchStatus === "started") return "match: started";
     if (matchStatus === "ended") return "match: ended";
     if (matchStatus === "error") return "match: network_error";
     return "match: none";
-  }, [matchId, matchStatus]);
+  }, [matchId, matchStatus, isAutoMatch]);
 
-  // ✅ poll match status (existing)
+  // ===== poll match status =====
   useEffect(() => {
     if (!matchId) return;
 
@@ -154,7 +273,7 @@ function PlayInner() {
     };
   }, [matchId]);
 
-  // ✅ poll match info for escrow display
+  // ===== poll match info =====
   useEffect(() => {
     if (!matchId) return;
 
@@ -193,7 +312,7 @@ function PlayInner() {
     };
   }, [matchId]);
 
-  // ✅ poll wallet for current tab playerId
+  // ===== poll wallet =====
   useEffect(() => {
     if (!playerId) return;
 
@@ -236,7 +355,7 @@ function PlayInner() {
     };
   }, [playerId]);
 
-    // ✅ poll cashouts list for this playerId
+  // ===== poll cashouts =====
   useEffect(() => {
     if (!playerId) return;
 
@@ -245,8 +364,7 @@ function PlayInner() {
 
     const tick = async () => {
       try {
-        const url =
-          `/api/cashout/list?playerId=${encodeURIComponent(playerId)}&limit=50`;
+        const url = `/api/cashout/list?playerId=${encodeURIComponent(playerId)}&limit=50`;
 
         const r = await fetch(url, {
           method: "GET",
@@ -283,8 +401,88 @@ function PlayInner() {
     };
   }, [playerId]);
 
+  // ===== computed =====
+  const escrowLabel = useMemo(() => {
+    if (!matchInfo) return "—";
+    const cur = String(matchInfo.currency || "USD");
+    const total = Number(matchInfo.escrowTotal || 0);
+    return `${total} ${cur}`;
+  }, [matchInfo]);
 
-    // ✅ DEV: fund + stake прямо на /play
+  const myBalanceLabel = useMemo(() => {
+    if (!wallet) return "—";
+    const b = wallet?.balances || {};
+    const usd = typeof b["USD"] === "number" ? b["USD"] : null;
+    return usd === null ? "—" : `${usd} USD`;
+  }, [wallet]);
+
+  const myUsdBalance = useMemo(() => {
+    const b = wallet?.balances || {};
+    const usd = typeof b["USD"] === "number" ? b["USD"] : 0;
+    return Number.isFinite(usd) ? usd : 0;
+  }, [wallet]);
+
+  const hasPendingCashout = useMemo(() => {
+    return cashouts.some((c: any) => String(c?.status || "").toLowerCase() === "pending");
+  }, [cashouts]);
+
+  const stakesCount = useMemo(() => Object.keys(matchInfo?.stakes || {}).length, [matchInfo]);
+
+  const stakesList = useMemo(() => {
+    const stakes = (matchInfo?.stakes || {}) as Record<string, number>;
+    return Object.entries(stakes)
+      .map(([pid, amt]) => ({ playerId: String(pid), amount: Number(amt || 0) }))
+      .filter((x) => x.playerId && Number.isFinite(x.amount) && x.amount > 0)
+      .sort((a, b) => b.amount - a.amount);
+  }, [matchInfo]);
+
+  function shortPid(pid: string) {
+    if (!pid) return "—";
+    if (pid.length <= 14) return pid;
+    return `${pid.slice(0, 6)}…${pid.slice(-4)}`;
+  }
+
+  const resultLabel = useMemo(() => {
+    if (!matchId || !matchInfo) return null;
+
+    const status = String(matchInfo.status || "");
+    const pot = Number(matchInfo.escrowTotal || 0);
+
+    if (status !== "ended") return null;
+
+    const winnerId = String(matchInfo.winnerPlayerId || "");
+    if (!winnerId) return "Result: ended (no winner)";
+
+    if (winnerId === playerId) return `Result: YOU WON +${pot} USD`;
+    return `Result: you lost (winner got ${pot} USD)`;
+  }, [matchId, matchInfo, playerId]);
+
+  const canStartMatch = !!matchId && matchStatus === "created" && (isSolo || stakesCount >= 2);
+
+  // ===== AUTO START WHEN READY (AUTO-MATCH REAL FLOW) =====
+  const autoStartRef = useRef(false);
+  useEffect(() => {
+    if (!matchId) return;
+    if (isSolo) return;
+    if (matchStatus !== "created") return;
+    if (stakesCount < 2) return;
+    if (autoStartRef.current) return;
+
+    autoStartRef.current = true;
+
+    (async () => {
+      const res = await apiStartMatch(matchId);
+      if (!res.ok) {
+        console.error("[AUTO START] failed", res);
+        setStartError(`Auto start failed: ${res.status || "?"} ${res.error || "unknown"}`);
+        autoStartRef.current = false; // allow retry
+        return;
+      }
+      setStartError(null);
+    })();
+  }, [matchId, matchStatus, stakesCount, isSolo]);
+
+  // ===== DEV handlers (existing) =====
   async function onFund50() {
     if (!playerId) return;
 
@@ -302,16 +500,13 @@ function PlayInner() {
         return;
       }
 
-      // обновим сразу (и дальше поллинг добьёт)
       setWallet((prev: any) => j?.wallet ?? prev);
     } finally {
       setBusy(null);
     }
   }
 
-  
-
-    async function onWithdrawDev() {
+  async function onWithdrawDev() {
     if (!playerId) return;
 
     const amt = Number(withdrawAmount);
@@ -345,12 +540,10 @@ function PlayInner() {
     }
   }
 
-
-
-    async function onStake() {
+  async function onStake() {
     if (!playerId) return;
     if (!matchId) {
-      alert("No matchId. Open /play?matchId=... from lobby invite.");
+      alert("No matchId.");
       return;
     }
 
@@ -365,7 +558,7 @@ function PlayInner() {
       const r = await fetch(`/api/match/${encodeURIComponent(matchId)}/stake`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ playerId, amount: amt, currency: "USD", gameId: GAME_ID }),
+        body: JSON.stringify({ playerId, amount: amt, currency: "USD", gameId }),
       });
 
       const j = await r.json().catch(() => null);
@@ -383,443 +576,231 @@ function PlayInner() {
     }
   }
 
+  async function onStartMatch() {
+    if (!matchId) return;
 
+    setStartError(null);
 
-async function onStartMatch() {
-  if (!matchId) return;
+    try {
+      const res = await apiStartMatch(matchId);
 
-  setStartError(null);
-
-  try {
-    const res = await apiStartMatch(matchId);
-
-    if (!res.ok) {
-      // ✅ show concrete reason
-      if (res.status === 409 && res.error === "escrow_not_ready") {
-        const stakesCount = Object.keys(matchInfo?.stakes || {}).length;
-        setStartError(
-          `Escrow not ready: need stakes first (current stakes: ${stakesCount}). Open 2 tabs, Stake in both tabs, then Start.`
-        );
-        return;
-      }
-
-      if (res.status === 409 && res.error === "match_ended") {
-        setStartError("Match already ended");
-        setMatchStatus("ended");
-        return;
-      }
-
-      if (res.status === 404 && res.error === "not_found") {
-        setStartError("Match not found");
+      if (!res.ok) {
+        if (res.status === 409 && res.error === "escrow_not_ready") {
+          const count = Object.keys(matchInfo?.stakes || {}).length;
+          setStartError(`Escrow not ready: need stakes first (current stakes: ${count}).`);
+          return;
+        }
+        setStartError(`Failed to start match (${res.status || "?"}): ${res.error || "unknown"}`);
         setMatchStatus("error");
         return;
       }
 
-      setStartError(`Failed to start match (${res.status || "?"}): ${res.error || "unknown"}`);
+      const status = String(res.data?.match?.status || "").trim();
+      if (status === "created" || status === "started" || status === "ended") {
+        setMatchStatus(status as MatchStatus);
+        return;
+      }
+
+      setStartError("Bad server response");
       setMatchStatus("error");
-      return;
+    } catch (e) {
+      console.error("[START MATCH] network", e);
+      setStartError("Network error");
+      setMatchStatus("error");
     }
-
-    const status = String(res.data?.match?.status || "").trim();
-    if (status === "created" || status === "started" || status === "ended") {
-      setMatchStatus(status as MatchStatus);
-      return;
-    }
-
-    setStartError("Bad server response");
-    setMatchStatus("error");
-  } catch (e) {
-    console.error("[START MATCH] network", e);
-    setStartError("Network error");
-    setMatchStatus("error");
   }
-}
-
-
 
   async function onCreateNewMatch() {
-    try {
-      const r = await fetch("/api/match/create", {
-        method: "POST",
-        headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify({ gameId: GAME_ID }),
-      });
-
-      const data = await r.json().catch(() => null);
-      const id = String(data?.match?.id || "").trim();
-
-      if (!r.ok || !id) {
-        console.log("[CREATE MATCH] bad response:", { status: r.status, data });
-        alert("Create match failed. Check API is running.");
-        return;
-      }
-
-      try {
-        localStorage.setItem("rt_match_host_v1", id);
-      } catch {}
-
-      const started = await apiStartMatch(id);
-      if (!started.ok) {
-        alert(`Start new match failed (${started.status || "?"}): ${started.error || "unknown"}`);
-        return;
-      }
-
-      router.replace(`/play?matchId=${encodeURIComponent(id)}`);
-    } catch (e) {
-      console.error("[CREATE MATCH] network", e);
-      alert("Create match failed (network). Check API is running.");
+    const created = await createMatch(gameId);
+    if (!created.ok) {
+      alert(`Create match failed: ${created.status} ${created.error}`);
+      return;
     }
+
+    try {
+      localStorage.setItem("rt_match_host_v1", created.id);
+    } catch {}
+
+    const started = await apiStartMatch(created.id);
+    if (!started.ok) {
+      alert(`Start new match failed (${started.status || "?"}): ${started.error || "unknown"}`);
+      return;
+    }
+
+    router.replace(`/play?matchId=${encodeURIComponent(created.id)}&gameId=${encodeURIComponent(gameId)}`);
   }
 
-  const escrowLabel = useMemo(() => {
-    if (!matchInfo) return "—";
-    const cur = String(matchInfo.currency || "USD");
-    const total = Number(matchInfo.escrowTotal || 0);
-    return `${total} ${cur}`;
-  }, [matchInfo]);
+      return (
+    <main className="min-h-screen text-white">
+      {/* ===== Blitz-like purple backdrop ===== */}
+      <div className="relative min-h-screen overflow-hidden bg-[#07040d]">
+        {/* glow blobs */}
+        <div className="pointer-events-none absolute -top-40 left-1/2 h-[520px] w-[520px] -translate-x-1/2 rounded-full bg-fuchsia-600/25 blur-[110px]" />
+        <div className="pointer-events-none absolute -bottom-52 left-1/4 h-[520px] w-[520px] -translate-x-1/2 rounded-full bg-violet-600/25 blur-[120px]" />
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(1200px_600px_at_50%_-10%,rgba(168,85,247,0.25),transparent_60%)]" />
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(900px_500px_at_20%_120%,rgba(236,72,153,0.16),transparent_55%)]" />
 
-  const myBalanceLabel = useMemo(() => {
-    if (!wallet) return "—";
-    const b = wallet?.balances || {};
-    const usd = typeof b["USD"] === "number" ? b["USD"] : null;
-    return usd === null ? "—" : `${usd} USD`;
-  }, [wallet]);
+        {/* ===== Center phone frame ===== */}
+        <div className="mx-auto flex min-h-screen max-w-md flex-col px-4 pt-4 pb-24">
+          {/* ===== HUD ===== */}
+          <div className="rounded-[26px] border border-white/10 bg-white/[0.06] p-3 shadow-[0_20px_70px_rgba(0,0,0,0.6)] backdrop-blur">
+            <div className="flex items-center justify-between gap-3">
+              {/* Left: avatar + level */}
+              <div className="flex items-center gap-3">
+                <div className="relative h-11 w-11 overflow-hidden rounded-2xl border border-white/10 bg-white/10">
+                  <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.35),transparent_60%)]" />
+                </div>
 
-    // ===== INSERT START: cashout computed =====
-  const myUsdBalance = useMemo(() => {
-    const b = wallet?.balances || {};
-    const usd = typeof b["USD"] === "number" ? b["USD"] : 0;
-    return Number.isFinite(usd) ? usd : 0;
-  }, [wallet]);
-
-  const hasPendingCashout = useMemo(() => {
-    return cashouts.some((c: any) => String(c?.status || "").toLowerCase() === "pending");
-  }, [cashouts]);
-  // ===== INSERT END: cashout computed =====
-
-
-    const resultLabel = useMemo(() => {
-    if (!matchId || !matchInfo) return null;
-
-    const status = String(matchInfo.status || "");
-    const pot = Number(matchInfo.escrowTotal || 0);
-
-    if (status !== "ended") return null;
-
-    const winnerId = String(matchInfo.winnerPlayerId || "");
-    if (!winnerId) return "Result: ended (no winner)";
-
-    if (winnerId === playerId) return `Result: YOU WON +${pot} USD`;
-    return `Result: you lost (winner got ${pot} USD)`;
-  }, [matchId, matchInfo, playerId]);
-
-    const stakesCount = useMemo(() => {
-    return Object.keys(matchInfo?.stakes || {}).length;
-  }, [matchInfo]);
-
-  const canStartMatch =
-    !!matchId &&
-    matchStatus === "created" &&
-    stakesCount >= 2;
-
-      // ===== INSERT START: stakes list view-model =====
-  const stakesList = useMemo(() => {
-    const stakes = (matchInfo?.stakes || {}) as Record<string, number>;
-    const entries = Object.entries(stakes)
-      .map(([pid, amt]) => ({ playerId: String(pid), amount: Number(amt || 0) }))
-      .filter((x) => x.playerId && Number.isFinite(x.amount) && x.amount > 0)
-      .sort((a, b) => b.amount - a.amount);
-
-    return entries;
-  }, [matchInfo]);
-
-  function shortPid(pid: string) {
-    if (!pid) return "—";
-    if (pid.length <= 14) return pid;
-    return `${pid.slice(0, 6)}…${pid.slice(-4)}`;
-  }
-  // ===== INSERT END: stakes list view-model =====
-
-
-
-
-  return (
-    <main className="min-h-screen bg-black text-white">
-      <div className="mx-auto max-w-xl px-6 py-10">
-        <div className="flex items-center justify-between">
-          <h1 className="text-xl font-semibold">Play</h1>
-          <Link href="/lobby" className="text-sm text-white/70 hover:text-white">
-            Back
-          </Link>
-        </div>
-
-                {/* ✅ Wallet + Escrow HUD */}
-        <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="text-xs text-white/60">This tab player</div>
-              <div className="mt-1 font-mono text-sm text-white/90">{playerId ? playerId : "—"}</div>
-
-                             {/* ===== REPLACE START: stakes summary + list ===== */}
-              <div className="mt-2 text-xs text-white/60">
-                {matchId ? `stakes: ${Object.keys(matchInfo?.stakes || {}).length}` : ""}
-                {matchErr ? ` · ${matchErr}` : ""}
-                {resultLabel ? ` · ${resultLabel}` : ""}
+                <div>
+                  <div className="text-[10px] font-medium text-white/60">LEVEL</div>
+                  <div className="text-sm font-semibold">1</div>
+                </div>
               </div>
 
-              {matchId && stakesList.length > 0 ? (
-                <div className="mt-3 rounded-xl border border-white/10 bg-black/20 p-3">
-                  <div className="flex items-center justify-between">
-                    <div className="text-xs text-white/70">Stakes</div>
-                    <div className="text-[11px] text-white/40">{stakesList.length} players</div>
-                  </div>
-
-                  <div className="mt-2 space-y-2">
-                    {stakesList.slice(0, 10).map((s) => (
-                      <div
-                        key={s.playerId}
-                        className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2"
-                      >
-                        <div className="font-mono text-[11px] text-white/80">
-                          {shortPid(s.playerId)}
-                          {s.playerId === playerId ? (
-                            <span className="ml-2 text-emerald-200">(you)</span>
-                          ) : null}
-                        </div>
-                        <div className="text-[11px] text-white/70">
-                          {s.amount} USD
-                        </div>
-                      </div>
-                    ))}
+              {/* Middle: gems + cash */}
+              <div className="flex items-center gap-2">
+                <div className="rounded-2xl border border-white/10 bg-black/30 px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-block h-2.5 w-2.5 rotate-45 rounded-[3px] bg-fuchsia-300/90 shadow-[0_0_16px_rgba(236,72,153,0.55)]" />
+                    <div>
+                      <div className="text-[10px] font-medium text-white/60">GEMS</div>
+                      <div className="text-sm font-semibold">0</div>
+                    </div>
                   </div>
                 </div>
-              ) : null}
-              {/* ===== REPLACE END: stakes summary + list ===== */}
 
-
-
-                            {/* ===== REPLACE START: DEV_UI block ===== */}
-              {DEV_UI ? (
-                <>
-                  {/* Fund + Stake (DEV) */}
-                  <div className="mt-3 flex gap-2">
-                    <button
-                      type="button"
-                      onClick={onFund50}
-                      disabled={busy !== null}
-                      className={
-                        "rounded-xl px-3 py-2 text-xs font-medium " +
-                        (busy !== null
-                          ? "cursor-not-allowed bg-white/20 text-white/60"
-                          : "bg-white text-black")
-                      }
-                    >
-                      Fund +50 (DEV)
-                    </button>
-
-                    <input
-                      value={stakeAmount}
-                      onChange={(e) => setStakeAmount(e.target.value)}
-                      inputMode="decimal"
-                      className="w-24 rounded-xl border border-white/12 bg-white/5 px-3 py-2 text-xs text-white/90 outline-none"
-                      placeholder="Stake"
-                    />
-
-                    <button
-                      type="button"
-                      onClick={onStake}
-                      disabled={busy !== null || !matchId}
-                      className={
-                        "rounded-xl px-3 py-2 text-xs font-medium " +
-                        (busy !== null || !matchId
-                          ? "cursor-not-allowed bg-white/5 text-white/40"
-                          : "border border-white/15 bg-white/10 text-white/90")
-                      }
-                    >
-                      Stake
-                    </button>
+                <div className="rounded-2xl border border-white/10 bg-black/30 px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <span className="inline-flex h-4 w-4 items-center justify-center rounded-lg bg-emerald-400/15 text-emerald-200">
+                      $
+                    </span>
+                    <div>
+                      <div className="text-[10px] font-medium text-white/60">CASH</div>
+                      <div className="text-sm font-semibold">
+                        {walletErr ? "—" : `${Number(myUsdBalance || 0).toFixed(2)} USD`}
+                      </div>
+                    </div>
                   </div>
+                </div>
+              </div>
 
-                  {/* Cash out (public) */}
-                  <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <div className="text-xs text-white/60">
-                      Balance:{" "}
-                      <span className="font-mono text-white/85">{myBalanceLabel}</span>
-                    </div>
+              {/* Right: add button */}
+              <button
+                type="button"
+                className="h-11 w-11 rounded-2xl bg-white text-black shadow-[0_14px_35px_rgba(255,255,255,0.18)] active:scale-[0.99]"
+                onClick={() => {}}
+                aria-label="Add"
+                title="Add"
+              >
+                <span className="text-xl font-bold leading-none">+</span>
+              </button>
+            </div>
+          </div>
 
-                    <input
-                      value={withdrawAmount}
-                      onChange={(e) => setWithdrawAmount(e.target.value)}
-                      inputMode="decimal"
-                      className="w-28 rounded-xl border border-white/12 bg-white/5 px-3 py-2 text-xs text-white/90 outline-none"
-                      placeholder="Amount"
-                    />
+          {/* ===== Game card ===== */}
+          <div className="mt-4 rounded-[28px] border border-white/10 bg-white/[0.06] p-3 shadow-[0_18px_60px_rgba(0,0,0,0.6)] backdrop-blur">
+            <div className="mb-2 flex items-center justify-between px-1">
+              <div className="text-xs font-semibold text-white/80">Reaction Tap</div>
+              <div className="text-[11px] text-white/50">
+                {mode ? mode : "practice"}
+              </div>
+            </div>
 
-                    <button
-                      type="button"
-                      onClick={onWithdrawDev}
-                      disabled={cashoutBusy || !playerId || myUsdBalance <= 0 || hasPendingCashout}
-                      className={
-                        "rounded-xl px-3 py-2 text-xs font-medium " +
-                        (cashoutBusy || !playerId || myUsdBalance <= 0 || hasPendingCashout
-                          ? "cursor-not-allowed bg-white/5 text-white/40"
-                          : "border border-white/15 bg-white/10 text-white/90")
-                      }
-                    >
-                      {hasPendingCashout ? "Cash out pending…" : "Cash out"}
-                    </button>
+            {/* Fixed phone-like aspect ratio area */}
+            <div className="relative overflow-hidden rounded-[22px] border border-white/10 bg-black/40">
+              <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(900px_500px_at_50%_0%,rgba(168,85,247,0.18),transparent_60%)]" />
 
-                    <Link href="/cashout-admin" className="text-xs text-white/60 hover:text-white">
-                      Open cashout admin →
-                    </Link>
-                  </div>
+              {/* Keep canvas looking like a phone screen */}
+              <div className="relative w-full aspect-[9/16]">
+                {/* MATCHMAKING OVERLAY */}
+{!isSolo && (matchStatus === "created" || !matchId) && stakesCount < 2 ? (
+  <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/55 backdrop-blur">
+    <div className="relative w-[88%] rounded-[28px] border border-white/10 bg-gradient-to-b from-violet-500/15 to-fuchsia-500/10 p-5 text-center shadow-[0_30px_110px_rgba(0,0,0,0.75)]">
+  {/* soft glow */}
+  <div className="pointer-events-none absolute -inset-8 rounded-[36px] bg-gradient-to-b from-fuchsia-500/10 to-violet-500/10 blur-2xl" />
+  <div className="pointer-events-none absolute inset-0 rounded-[28px] ring-1 ring-white/10" />
 
-                  {cashoutErr ? (
-                    <div className="mt-2 text-xs text-red-200">cashout: {cashoutErr}</div>
-                  ) : null}
+  {/* icon */}
+  <div className="relative mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-[22px] border border-white/10 bg-black/25">
+    <div className="relative h-8 w-8">
+      <div className="absolute inset-0 rounded-full border-2 border-white/15" />
+      <div className="absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-fuchsia-300/90 border-r-violet-300/70" />
+      <div className="absolute inset-2 rounded-full bg-white/5" />
+    </div>
+  </div>
 
-                  {lastCashout?.id ? (
-                    <div className="mt-2 text-[11px] text-white/60">
-                      last request: <span className="font-mono">{lastCashout.id}</span> ·{" "}
-                      <span className="uppercase">{String(lastCashout.status || "")}</span>
-                    </div>
-                  ) : null}
+  <div className="relative text-[18px] font-semibold tracking-tight text-white">
+    Finding opponent…
+  </div>
+  <div className="relative mt-2 text-sm text-white/70">
+    Matchmaking in progress
+  </div>
 
-                  {/* Cashouts list */}
-                  <div className="mt-3 rounded-xl border border-white/10 bg-black/20 p-3">
-                    <div className="flex items-center justify-between">
-                      <div className="text-xs text-white/70">Cashouts (this player)</div>
-                      <div className="text-[11px] text-white/40">{playerId}</div>
-                    </div>
+  {/* progress card */}
+  <div className="relative mt-5 rounded-2xl border border-white/10 bg-black/20 p-3">
+    <div className="flex items-center justify-between text-[11px] text-white/60">
+      <span>Stakes</span>
+      <span className="font-mono text-white/80">{stakesCount} / 2</span>
+    </div>
 
-                    {cashoutsErr ? (
-                      <div className="mt-2 text-xs text-red-200">list: {cashoutsErr}</div>
-                    ) : null}
+    <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-white/10">
+      <div
+        className="h-full rounded-full bg-gradient-to-r from-fuchsia-300/90 to-violet-300/80 transition-all duration-500"
+        style={{ width: `${Math.min(100, Math.max(8, (stakesCount / 2) * 100))}%` }}
+      />
+    </div>
 
-                    {cashouts.length === 0 ? (
-                      <div className="mt-2 text-xs text-white/50">No cashouts yet.</div>
-                    ) : (
-                      <div className="mt-2 space-y-2">
-                        {cashouts.slice(0, 10).map((c) => (
-                          <div
-                            key={String(c?.id)}
-                            className="rounded-lg border border-white/10 bg-white/5 p-2"
-                          >
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="font-mono text-[11px] text-white/80 truncate">
-                                {String(c?.id || "")}
-                              </div>
-                              <div className="text-[11px] text-white/70 uppercase">
-                                {String(c?.status || "")}
-                              </div>
-                            </div>
+    <div className="mt-2 text-[11px] text-white/50">
+      {stakesCount < 2 ? "Waiting for another player…" : "Starting…"}
+    </div>
+  </div>
 
-                            <div className="mt-1 flex items-center justify-between text-[11px] text-white/55">
-                              <div>
-                                {Number(c?.amount || 0)} {String(c?.currency || "USD")}
-                              </div>
-                              <div className="font-mono">
-                                {c?.createdAt ? new Date(Number(c.createdAt)).toLocaleString() : "—"}
-                              </div>
-                            </div>
-                            {/* ===== INSERT START: payoutRef in list ===== */}
-{c?.payoutRef ? (
-  <div className="mt-1 text-[11px] text-white/50">
-    payoutRef: <span className="font-mono text-white/70">{String(c.payoutRef)}</span>
+  {/* cancel button (blitz style) */}
+  <button
+    type="button"
+    onClick={() => {
+      const rt = (sp.get("returnTo") || "/games").trim() || "/games";
+      window.location.href = rt;
+    }}
+    className="relative mt-6 w-full rounded-2xl border border-white/15 bg-white/10 px-4 py-3 text-sm font-semibold text-white shadow-[0_18px_60px_rgba(0,0,0,0.45)] hover:bg-white/15 active:scale-[0.99]"
+  >
+    Cancel
+  </button>
+
+  {startError ? (
+    <div className="relative mt-4 text-sm text-red-200">{startError}</div>
+  ) : null}
+</div>
   </div>
 ) : null}
-{/* ===== INSERT END: payoutRef in list ===== */}
 
-                          </div>
-                        ))}
-                      </div>
+                <div className="absolute inset-0">
+                  <GameCanvas
+                    canPlay={Boolean(
+                      isSolo ||
+                        (matchId && (matchStatus === "started" || (matchStatus === "created" && stakesCount >= 2)))
                     )}
-                  </div>
-
-                  <div className="mt-2 text-[11px] text-white/45">
-                    Stake uses current matchId {matchId ? "" : "(open match first)"}.
-                  </div>
-                </>
-              ) : (
-                <div className="mt-3 text-xs text-white/50">
-                  DEV controls are hidden. (Set{" "}
-                  <span className="font-mono">NEXT_PUBLIC_DEV_UI=1</span> to enable.)
+                  />
                 </div>
-              )}
-              {/* ===== REPLACE END: DEV_UI block ===== */}
-
-
-
-            </div>
-
-            <div className="text-right">
-              <div className="text-xs text-white/60">Match escrow</div>
-              <div className="mt-1 font-mono text-sm text-white/90">{matchId ? escrowLabel : "—"}</div>
-              <div className="mt-2 text-xs text-white/60">
-                {matchId ? `stakes: ${Object.keys(matchInfo?.stakes || {}).length}` : ""}
-                {matchErr ? ` · ${matchErr}` : ""}
               </div>
             </div>
           </div>
         </div>
 
+        {/* ===== Bottom Nav ===== */}
+        <nav className="fixed bottom-0 left-0 right-0 z-50 border-t border-white/10 bg-black/55 backdrop-blur">
+          <div className="mx-auto flex max-w-md items-center justify-between px-5 py-3">
+            <button className="text-[11px] font-medium text-white/70 hover:text-white">Shop</button>
+            <button className="text-[11px] font-medium text-white/70 hover:text-white">Results</button>
 
-        {matchId && (
-          <div className="mt-3 rounded-2xl border border-white/10 bg-white/5 p-4">
-            <div className="text-xs text-white/60">Match</div>
-            <div className="mt-1 font-mono text-sm text-white/90">{matchId}</div>
+            <button className="rounded-[18px] bg-white px-6 py-3 text-[11px] font-semibold text-black shadow-[0_16px_45px_rgba(255,255,255,0.14)]">
+              Games
+            </button>
 
-            <div className="mt-2 flex items-center justify-between gap-3">
-              <div className="text-sm text-white/70">
-                {label} · <span className="font-mono text-white/60">{GAME_ID}</span>
-                {isHost ? <span className="ml-2 text-emerald-200">· host</span> : null}
-              </div>
-
-              <div className="flex items-center gap-2">
-                                <div className="flex flex-col items-end gap-1">
-                  <button
-                    type="button"
-                    onClick={onStartMatch}
-                    disabled={!canStartMatch}
-                    className={
-                      "rounded-xl px-4 py-2 text-sm font-medium " +
-                      (!canStartMatch
-                        ? "cursor-not-allowed bg-white/20 text-white/60"
-                        : "bg-white text-black")
-                    }
-                  >
-                    Start match
-                  </button>
-
-                  {!canStartMatch && matchStatus === "created" && (
-                    <div className="text-[11px] text-white/50">
-                      Need 2 stakes to start (now {stakesCount})
-                    </div>
-                  )}
-                </div>
-
-
-                <button
-                  type="button"
-                  onClick={onCreateNewMatch}
-                  className="rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-sm font-medium text-white/90"
-                >
-                  Create new match
-                </button>
-              </div>
-            </div>
-
-            {startError ? <div className="mt-2 text-sm text-red-200">{startError}</div> : null}
-
-            <div className="mt-2 text-xs text-white/50">
-              2nd tab will auto-update from created → started.
-            </div>
+            <button className="text-[11px] font-medium text-white/70 hover:text-white">Rewards</button>
+            <button className="text-[11px] font-medium text-white/70 hover:text-white">Leagues</button>
           </div>
-        )}
-
-        <div className="mt-6">
-          <GameCanvas canPlay={!matchId || matchStatus === "started"} />
-        </div>
+        </nav>
       </div>
     </main>
   );
@@ -832,6 +813,4 @@ export default function PlayPage() {
     </Suspense>
   );
 }
-// ===== FILE END: apps/web/app/(public)/play/page.tsx =====
-
 // ===== FILE END: apps/web/app/(public)/play/page.tsx =====

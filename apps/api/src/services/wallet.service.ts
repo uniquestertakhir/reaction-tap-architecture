@@ -7,8 +7,11 @@ export type Currency = "USD";
 export type Wallet = {
   playerId: string;
 
-  /** available (can be staked / withdrawn request) */
+  /** cash (withdrawable) */
   balances: Record<string, number>; // e.g. { "USD": 50 }
+
+  /** bonus cash (NOT withdrawable; forfeited on withdraw) */
+  bonus?: Record<string, number>; // e.g. { "USD": 5 }
 
   /** held (frozen for pending cashout) */
   held: Record<string, number>; // e.g. { "USD": 10 }
@@ -70,11 +73,12 @@ function normCurrency(v: any): Currency | null {
 function ensureWallet(playerId: string): Wallet {
   let w = wallets.get(playerId);
   if (!w) {
-    w = { playerId, balances: {}, held: {} };
+    w = { playerId, balances: {}, bonus: {}, held: {} };
     wallets.set(playerId, w);
     void saveWalletsToDisk(); // ✅ persist new wallet
   }
   if (!w.balances) w.balances = {};
+  if (!w.bonus) w.bonus = {};
   if (!w.held) w.held = {};
   return w;
 }
@@ -84,6 +88,32 @@ export function getWallet(playerId: string): Wallet {
   const pid = String(playerId || "").trim();
   return ensureWallet(pid);
 }
+
+// ===== ADD BLOCK START: bonus helpers =====
+export function getBonusBalance(playerId: string, currency: Currency | string): number {
+  const pid = String(playerId || "").trim();
+  const cur = normCurrency(currency) ?? "USD";
+  const w = ensureWallet(pid);
+  return Number(w.bonus?.[cur] || 0);
+}
+
+export function forfeitBonus(playerId: string, currency?: Currency | string): Wallet {
+  const pid = String(playerId || "").trim();
+  const w = ensureWallet(pid);
+
+  if (!currency) {
+    // wipe all bonus
+    w.bonus = {};
+  } else {
+    const cur = normCurrency(currency) ?? "USD";
+    if (!w.bonus) w.bonus = {};
+    w.bonus[cur] = 0;
+  }
+
+  void saveWalletsToDisk();
+  return w;
+}
+// ===== ADD BLOCK END: bonus helpers =====
 
 export function fundWallet(playerId: string, amount: number, currency: Currency | string): Wallet {
   const pid = String(playerId || "").trim();

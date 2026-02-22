@@ -1,5 +1,5 @@
 // ===== FILE START: apps/api/src/services/cashout.service.ts =====
-import { getWallet, holdFunds, releaseHold, captureHold, type Currency } from "./wallet.service.js";
+import { getWallet, holdFunds, releaseHold, captureHold, forfeitBonus, type Currency } from "./wallet.service.js";
 import { getPayoutProvider } from "./payout.provider.js";
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -31,6 +31,23 @@ type Ok<T> = { ok: true } & T;
 type Err = { ok: false; error: string };
 
 const cashouts = new Map<string, CashoutRequest>();
+// ===== INSERT START: withdraw limits (like Blitz) =====
+const WITHDRAW_MIN_USD = 10;
+const WITHDRAW_MAX_USD = 100;
+const WITHDRAW_MONTHLY_LIMIT_USD = 30_000;
+
+// DEV: monthly tracking in-memory (ok for now)
+const monthlyTotals = new Map<string, number>(); // key: `${playerId}:${YYYY-MM}` -> total
+function monthKey(ts = Date.now()) {
+  const d = new Date(ts);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+function monthlyKey(playerId: string) {
+  return `${playerId}:${monthKey()}`;
+}
+// ===== INSERT END: withdraw limits (like Blitz) =====
 
 // ===== INSERT START: cashout persistence (DEV file) =====
 const DATA_DIR = path.resolve(process.cwd(), "data");
@@ -115,9 +132,22 @@ export function createCashout(
   if (!pid) return { ok: false, error: "bad_playerId" };
   if (!cur) return { ok: false, error: "bad_currency" };
   if (!Number.isFinite(amt) || amt <= 0) return { ok: false, error: "bad_amount" };
+    // limits (USD only for now)
+  if (amt < WITHDRAW_MIN_USD) return { ok: false, error: "below_min_withdraw" };
+  if (amt > WITHDRAW_MAX_USD) return { ok: false, error: "above_max_withdraw" };
+
+  const mk = monthlyKey(pid);
+  const used = Number(monthlyTotals.get(mk) || 0);
+  if (used + amt > WITHDRAW_MONTHLY_LIMIT_USD) return { ok: false, error: "monthly_limit_exceeded" };
 
   const h = holdFunds(pid, amt, cur);
   if (!h.ok) return { ok: false, error: h.error };
+    // ✅ Blitz logic: bonus cash is forfeited when withdrawing
+  forfeitBonus(pid, cur);
+
+  // track monthly
+  monthlyTotals.set(mk, used + amt);
+
 
   const req: CashoutRequest = {
     id: uuid(),

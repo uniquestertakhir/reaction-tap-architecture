@@ -5,13 +5,22 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { addVerifiedRun } from "@/lib/leaderboard";
 import { apiGetMatch, apiGetRuns } from "@/lib/matchApi";
+import { readPlayer, updatePlayer } from "@/lib/playerStore";
+import { addResultsRun } from "@/lib/resultsStore";
 
 // ===== REPLACE START: Props =====
 type Props = {
   durationMs?: number; // default 30s
   canPlay?: boolean; // default true (solo). match needs started.
+
+  onGameEnd?: (result: {
+    win: boolean;
+    score: number;
+    ms: number;
+  }) => void;
 };
 // ===== REPLACE END: Props =====
+
 
 type Rect = { left: number; top: number; width: number; height: number };
 
@@ -106,6 +115,8 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
   const [runsError, setRunsError] = useState<string | null>(null);
   const [runsLoading, setRunsLoading] = useState(false);
   // ===== REPLACE END: match + runs state =====
+    // ✅ Practice reward (solo, no matchId)
+  const [practiceRewardGems, setPracticeRewardGems] = useState<number | null>(null);
 
   const [serverVerify, setServerVerify] = useState<
     | { verified: true; serverScore: number }
@@ -396,25 +407,66 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
     if (phase !== "ended") return;
     if (resultEmittedRef.current) return;
     if (roundSeed === null) return;
+        // reset last reward UI
+    setPracticeRewardGems(null);
+
 
     const result: RunResult = {
-      gameId: GAME_ID, // ✅ NEW
-      matchId, // ✅ existing
-      playerId,
-      seed: roundSeed,
-      hits,
-      misses,
-      avgReactionMs: reactionCount > 0 ? reactionSumMs / reactionCount : null,
-      score,
-      durationMs,
-      spawnCount: hits + 1,
-      tapCount: hits + misses,
-    };
+  gameId: GAME_ID,
+  matchId,
+  playerId, // ✅ IMPORTANT: same tab playerId that was used to stake
+  seed: roundSeed,
+  hits,
+  misses,
+  avgReactionMs: reactionCount > 0 ? reactionSumMs / reactionCount : null,
+  score,
+  durationMs,
+  spawnCount: hits + 1,
+  tapCount: hits + misses,
+};
+
 
     resultEmittedRef.current = true;
     if (process.env.NODE_ENV !== "production") {
       console.log("[RUN RESULT]", result);
     }
+// ✅ PRACTICE (no match): award gems locally + save local run for /results
+if (!matchId) {
+  // простая формула (потом заменим на нормальную экономику):
+  // минимум 1 💎, плюс за каждые 50 очков ещё 1 💎
+  const earned = Math.max(1, Math.floor(score / 50));
+
+  // 1) начисляем гемы
+  try {
+    const p = readPlayer();
+    updatePlayer({ gems: (p.gems || 0) + earned });
+  } catch {
+    // don't break UI
+  }
+
+    // 2) сохраняем run в общий results store (rt_results_v1), чтобы /results видел историю
+  try {
+    const modeParam = sp.get("mode") || "warm-up";
+
+    addResultsRun({
+      gameId: GAME_ID,
+      title: "Warm up",
+      currency: "gems",
+      prize: earned, // в results показываем как награду в 💎
+      matchId: null,
+      mode: String(modeParam),
+      score,
+    });
+  } catch {
+    // ignore
+  }
+
+
+  setPracticeRewardGems(earned);
+  setServerVerify({ verified: true, serverScore: score }); // для UI: “Verified”
+  return;
+}
+
 
     // send to server (through Next proxy to avoid CORS)
     fetch("/api/run/verify", {
@@ -560,7 +612,7 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
 
   const effectiveCanPlay = !!canPlay && !isEnded && !isMatchMissing;
 
-  // ✅ Match mode: auto-start run as soon as match becomes started.
+    // ✅ Match mode: join matchmaking (once) and auto-start run only after match becomes started.
   useEffect(() => {
     if (!matchId) return;
 
@@ -576,13 +628,15 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
       return;
     }
 
+    
+
     if (st === "started" && phase === "idle" && effectiveCanPlay) {
       if (autoStartedForMatchRef.current !== matchId) {
         autoStartedForMatchRef.current = matchId;
         start();
       }
     }
-  }, [matchId, matchInfo?.status, phase, effectiveCanPlay]);
+  }, [matchId, matchInfo?.status, phase, effectiveCanPlay, playerId]);
 
   const matchTimeLeftMs = useMemo(() => {
     if (!matchId) return null;
@@ -861,6 +915,12 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
                   )}
                 </div>
               )}
+                            {practiceRewardGems !== null ? (
+                <div className="mt-2 text-sm text-emerald-200">
+                  +{practiceRewardGems} 💎 (Practice reward)
+                </div>
+              ) : null}
+
 
               <div className="mt-3 text-sm text-white/60">
                 Hits: {hits} · Misses: {misses}
