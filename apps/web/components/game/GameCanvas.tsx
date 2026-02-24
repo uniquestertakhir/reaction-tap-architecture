@@ -2,25 +2,18 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useSearchParams } from "next/navigation";
 import { addVerifiedRun } from "@/lib/leaderboard";
 import { apiGetMatch, apiGetRuns } from "@/lib/matchApi";
 import { readPlayer, updatePlayer } from "@/lib/playerStore";
 import { addResultsRun } from "@/lib/resultsStore";
 
-// ===== REPLACE START: Props =====
 type Props = {
   durationMs?: number; // default 30s
   canPlay?: boolean; // default true (solo). match needs started.
-
-  onGameEnd?: (result: {
-    win: boolean;
-    score: number;
-    ms: number;
-  }) => void;
+  onGameEnd?: (result: { win: boolean; score: number; ms: number }) => void;
 };
-// ===== REPLACE END: Props =====
-
 
 type Rect = { left: number; top: number; width: number; height: number };
 
@@ -28,9 +21,9 @@ type Rect = { left: number; top: number; width: number; height: number };
 const GAME_ID = "reaction-tap";
 
 type RunResult = {
-  gameId: string; // ✅ NEW
-  matchId: string | null; // ✅ new (MVP)
-  playerId: string; // ✅ tab id
+  gameId: string;
+  matchId: string | null;
+  playerId: string;
   seed: number;
   hits: number;
   misses: number;
@@ -49,11 +42,9 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
   const sp = useSearchParams();
   const matchId = sp.get("matchId"); // string | null
 
-  // ===== INSERT START: playerId (per-tab) =====
+  // ===== playerId (per-tab) =====
   const [playerId, setPlayerId] = useState("player");
-
   useEffect(() => {
-    // sessionStorage = уникально для вкладки
     const KEY = "rt_tab_player_id_v1";
     try {
       const existing = window.sessionStorage.getItem(KEY);
@@ -70,16 +61,13 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
       window.sessionStorage.setItem(KEY, fresh);
       setPlayerId(fresh);
     } catch {
-      // fallback (no storage access)
       setPlayerId(`p_${Date.now()}`);
     }
   }, []);
-  // ===== INSERT END: playerId (per-tab) =====
 
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   const [phase, setPhase] = useState<"idle" | "ready" | "go" | "ended">("idle");
-
   const [timeLeftMs, setTimeLeftMs] = useState(durationMs);
 
   const [hits, setHits] = useState(0);
@@ -88,9 +76,7 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
   const [reactionCount, setReactionCount] = useState(0);
   const lastSpawnAtRef = useRef<number | null>(null);
 
-  // ===== REPLACE START: match + runs state =====
   const [roundSeed, setRoundSeed] = useState<number | null>(null);
-
   const [matchInfo, setMatchInfo] = useState<any>(null);
   const [matchPollError, setMatchPollError] = useState<string | null>(null);
 
@@ -99,8 +85,8 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
     createdAt: number;
     serverScore: number;
     matchId: string;
-    playerId?: string | null; // ✅ new (may be missing from API)
-    gameId?: string | null; // ✅ new (may be missing from API)
+    playerId?: string | null;
+    gameId?: string | null;
     seed: number;
     hits: number;
     misses: number;
@@ -114,8 +100,8 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
   const [runs, setRuns] = useState<RunItem[] | null>(null);
   const [runsError, setRunsError] = useState<string | null>(null);
   const [runsLoading, setRunsLoading] = useState(false);
-  // ===== REPLACE END: match + runs state =====
-    // ✅ Practice reward (solo, no matchId)
+
+  // ✅ Practice reward (solo, no matchId)
   const [practiceRewardGems, setPracticeRewardGems] = useState<number | null>(null);
 
   const [serverVerify, setServerVerify] = useState<
@@ -133,11 +119,13 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
   const rafRef = useRef<number | null>(null);
 
   const resultEmittedRef = useRef(false);
-  // run duration is fixed per run start (important for match mode)
-  const runDurationRef = useRef(durationMs);
 
-  // prevent auto-start loop in match mode
-  const autoStartedForMatchRef = useRef<string | null>(null);
+// ✅ NEW: idempotency guard for /run/verify (prevents double submit in dev/strict-mode)
+const verifyOnceRef = useRef<string | null>(null);
+
+// prevent auto-start loop in match mode
+const autoStartedForMatchRef = useRef<string | null>(null);
+const joinedMatchRef = useRef<string | null>(null);
 
   const avgReactionMs = reactionCount > 0 ? reactionSumMs / reactionCount : null;
 
@@ -151,27 +139,49 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
     const el = containerRef.current;
     if (!el) return null;
 
-    const W = el.clientWidth;
-    const H = el.clientHeight;
+    // ✅ Real rendered size
+    const r = el.getBoundingClientRect();
+    const W = Math.floor(r.width);
+    const H = Math.floor(r.height);
+
+    // layout not ready yet
+    if (W <= 0 || H <= 0) {
+      const fallbackSize = 64;
+      return { left: 0, top: 0, width: fallbackSize, height: fallbackSize };
+    }
 
     // target shrinks a bit as id grows (difficulty)
-    const base = 92; // px
-    const size = clamp(base - nextId * 1.2, 44, base);
+// ✅ FAIR: size is relative to field size (same feel across devices)
+const minSide = Math.max(1, Math.min(W, H));
 
-    // deterministic "pseudo-random" based on id (NO Math.random)
-    // These produce values in [0..1)
+// start around ~14% of min side, then shrink slowly
+const baseSize = Math.round(minSide * 0.14);
+const shrinkPerHit = Math.max(0.6, minSide * 0.0018); // scales with device
+const rawSize = baseSize - nextId * shrinkPerHit;
+
+// clamp to keep playable
+const size = clamp(rawSize, Math.max(36, Math.round(minSide * 0.08)), Math.round(minSide * 0.18));
+
     const k = seed * 0.000001;
-
     const a = (Math.sin((nextId + 1 + k) * 12.9898) * 43758.5453) % 1;
     const b = (Math.sin((nextId + 1 + k) * 78.233) * 12345.6789) % 1;
 
     const x01 = a < 0 ? a + 1 : a;
     const y01 = b < 0 ? b + 1 : b;
 
-    const left = Math.round(x01 * (W - size));
-    const top = Math.round(y01 * (H - size));
+    // ✅ FAIR PLAY AREA: center square of min(W,H)
+// screen is still fullscreen, but spawn zone is identical across devices
+const field = Math.max(1, Math.min(W, H));
+const ox = Math.floor((W - field) / 2);
+const oy = Math.floor((H - field) / 2);
 
-    return { left, top, width: size, height: size };
+const maxLeft = Math.max(0, field - size);
+const maxTop = Math.max(0, field - size);
+
+const left = ox + Math.round(x01 * maxLeft);
+const top = oy + Math.round(y01 * maxTop);
+
+return { left, top, width: size, height: size };
   }
 
   function reset() {
@@ -186,7 +196,10 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
     startAtRef.current = null;
     lastSpawnAtRef.current = null;
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = null;
+rafRef.current = null;
+
+// ✅ allow verify again for next run
+verifyOnceRef.current = null;
   }
 
   function start() {
@@ -194,7 +207,6 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
     setServerVerify(null);
     resultEmittedRef.current = false;
 
-    // ✅ Match-mode: no "ready" delay, and use remaining match time
     const isMatchMode = !!matchId && String(matchInfo?.status || "") === "started";
 
     let runMs = durationMs;
@@ -211,7 +223,6 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
       }
 
       if (runMs <= 0) {
-        // match already ended by timer
         resultEmittedRef.current = true;
         setServerVerify({ verified: false, reason: "match_ended" });
         setPhase("ended");
@@ -219,7 +230,6 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
       }
     }
 
-    // ✅ seed: for match use startedAt to be deterministic; otherwise Date.now()
     const seed =
       isMatchMode && Number.isFinite(Number(matchInfo?.startedAt))
         ? Number(matchInfo.startedAt)
@@ -227,7 +237,7 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
 
     setRoundSeed(seed);
 
-    // ✅ match: GO immediately; solo: keep "ready" delay
+    // match: go immediately
     if (isMatchMode) {
       setPhase("go");
       setTimeLeftMs(runMs);
@@ -259,12 +269,12 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
       return;
     }
 
-    // ===== SOLO MODE (old behavior) =====
+    // SOLO
     setPhase("ready");
 
     const now = Date.now();
     const d01 = ((Math.sin(now * 0.001) * 10000) % 1 + 1) % 1; // 0..1
-    const delayMs = 3000 + Math.floor(d01 * 4000); // 3000..7000
+    const delayMs = 800 + Math.floor(d01 * 700); // ✅ быстрее и приятнее: 0.8..1.5s
 
     window.setTimeout(() => {
       setPhase("go");
@@ -304,6 +314,7 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
     };
   }, []);
 
+  // poll match
   useEffect(() => {
     if (!matchId) return;
 
@@ -318,7 +329,6 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
         if (!alive) return;
 
         if (!res.ok) {
-          // normalize common errors
           if (res.status === 404 && res.error === "not_found") {
             setMatchInfo(null);
             setMatchPollError("not_found");
@@ -335,8 +345,6 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
         setMatchPollError("network_error");
       } finally {
         if (!alive) return;
-
-        // keep polling even when ended (winner can update later)
         const delay = st === "ended" ? 1500 : 800;
         t = setTimeout(tick, delay);
       }
@@ -350,6 +358,7 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
     };
   }, [matchId]);
 
+  // poll runs
   useEffect(() => {
     if (!matchId) return;
 
@@ -359,7 +368,6 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
     const tick = async () => {
       try {
         setRunsLoading(true);
-
         const res = await apiGetRuns(matchId);
 
         if (!alive) return;
@@ -382,7 +390,6 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
         if (!alive) return;
         setRunsLoading(false);
 
-        // stop polling if match ended AND winner score already known
         const st = String(matchInfo?.status || "");
         const hasWinner = typeof (matchInfo as any)?.serverScore === "number";
         if (st === "ended" && hasWinner) {
@@ -405,70 +412,63 @@ export default function GameCanvas({ durationMs = 30_000, canPlay = true }: Prop
   // emit run result once when ended
   useEffect(() => {
     if (phase !== "ended") return;
-    if (resultEmittedRef.current) return;
-    if (roundSeed === null) return;
-        // reset last reward UI
+if (roundSeed === null) return;
+
+// ✅ idempotency key = same run (matchId + seed + playerId)
+const verifyKey = `${matchId || "solo"}::${roundSeed}::${playerId}`;
+if (verifyOnceRef.current === verifyKey) return;
+verifyOnceRef.current = verifyKey;
+
+// ✅ keep your existing guard too (UI/result emit)
+if (resultEmittedRef.current) return;
+
     setPracticeRewardGems(null);
 
-
     const result: RunResult = {
-  gameId: GAME_ID,
-  matchId,
-  playerId, // ✅ IMPORTANT: same tab playerId that was used to stake
-  seed: roundSeed,
-  hits,
-  misses,
-  avgReactionMs: reactionCount > 0 ? reactionSumMs / reactionCount : null,
-  score,
-  durationMs,
-  spawnCount: hits + 1,
-  tapCount: hits + misses,
-};
-
+      gameId: GAME_ID,
+      matchId,
+      playerId,
+      seed: roundSeed,
+      hits,
+      misses,
+      avgReactionMs: reactionCount > 0 ? reactionSumMs / reactionCount : null,
+      score,
+      durationMs,
+      spawnCount: hits + 1,
+      tapCount: hits + misses,
+    };
 
     resultEmittedRef.current = true;
-    if (process.env.NODE_ENV !== "production") {
-      console.log("[RUN RESULT]", result);
+
+    // PRACTICE: award gems + store in results
+    if (!matchId) {
+      const earned = Math.max(1, Math.floor(score / 50));
+
+      try {
+        const p = readPlayer();
+        updatePlayer({ gems: (p.gems || 0) + earned });
+      } catch {}
+
+      try {
+        const modeParam = sp.get("mode") || "warm-up";
+        addResultsRun({
+          gameId: GAME_ID,
+          title: "Warm up",
+          currency: "gems",
+          prize: earned,
+          matchId: null,
+          mode: String(modeParam),
+          score,
+        });
+      } catch {}
+
+      setPracticeRewardGems(earned);
+      setServerVerify({ verified: true, serverScore: score });
+      return;
     }
-// ✅ PRACTICE (no match): award gems locally + save local run for /results
-if (!matchId) {
-  // простая формула (потом заменим на нормальную экономику):
-  // минимум 1 💎, плюс за каждые 50 очков ещё 1 💎
-  const earned = Math.max(1, Math.floor(score / 50));
 
-  // 1) начисляем гемы
-  try {
-    const p = readPlayer();
-    updatePlayer({ gems: (p.gems || 0) + earned });
-  } catch {
-    // don't break UI
-  }
+    
 
-    // 2) сохраняем run в общий results store (rt_results_v1), чтобы /results видел историю
-  try {
-    const modeParam = sp.get("mode") || "warm-up";
-
-    addResultsRun({
-      gameId: GAME_ID,
-      title: "Warm up",
-      currency: "gems",
-      prize: earned, // в results показываем как награду в 💎
-      matchId: null,
-      mode: String(modeParam),
-      score,
-    });
-  } catch {
-    // ignore
-  }
-
-
-  setPracticeRewardGems(earned);
-  setServerVerify({ verified: true, serverScore: score }); // для UI: “Verified”
-  return;
-}
-
-
-    // send to server (through Next proxy to avoid CORS)
     fetch("/api/run/verify", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -477,35 +477,25 @@ if (!matchId) {
       .then(async (r) => {
         const j = await r.json().catch(() => null);
 
-        // ✅ map HTTP status to stable reasons
         if (!r.ok) {
           const reason =
             (j && typeof j.reason === "string" && j.reason) ||
             (r.status === 409 ? "match_ended" : r.status === 404 ? "match_not_found" : "api_error");
 
           setServerVerify({ verified: false, reason });
-          console.log("[SERVER VERIFY]", { ok: false, status: r.status, body: j });
-
-          // stop here
           return null;
         }
 
         setServerVerify(j);
-        console.log("[SERVER VERIFY]", j);
-
         return j;
       })
       .then(async (data) => {
         if (!data) return;
-
-        // ✅ match can auto-end on server timer; show a clear message and stop
-        if (data?.verified === false && data?.reason === "match_ended") {
-          return;
-        }
+        if (data?.verified === false && data?.reason === "match_ended") return;
 
         if (data?.verified === true && typeof data.serverScore === "number") {
           addVerifiedRun({
-            gameId: GAME_ID, // ✅ NEW (local leaderboard can ignore for now)
+            gameId: GAME_ID,
             seed: result.seed,
             hits: result.hits,
             misses: result.misses,
@@ -517,7 +507,6 @@ if (!matchId) {
             ...(result.matchId ? { matchId: result.matchId } : {}),
           } as any);
 
-          // END MATCH on server (only for verified run + when matchId exists)
           try {
             if (!matchId) return;
 
@@ -531,24 +520,20 @@ if (!matchId) {
               }),
             });
 
-            const j2 = await r2.json();
-            console.log("[MATCH END]", j2);
-          } catch (e) {
-            console.warn("[MATCH END ERROR]", e);
-          }
+            await r2.json();
+          } catch {}
         }
       })
-      .catch((err) => {
+      .catch(() => {
         setServerVerify({ verified: false, reason: "network_error" });
-        console.error("[SERVER VERIFY ERROR]", err);
       });
-  }, [phase, roundSeed, hits, misses, reactionSumMs, reactionCount, score, durationMs, matchId, playerId]);
+  }, [phase, roundSeed, hits, misses, reactionSumMs, reactionCount, score, durationMs, matchId, playerId, sp]);
 
   function onHit(e: React.PointerEvent) {
     e.preventDefault();
-    e.stopPropagation(); // важно: чтобы не считалось как miss
+    e.stopPropagation();
     if (phase === "ready") {
-      setPhase("ended"); // false start on target (редко, но на всякий)
+      setPhase("ended");
       return;
     }
     if (phase !== "go") return;
@@ -565,15 +550,12 @@ if (!matchId) {
 
     const nextId = targetId + 1;
     setTargetId(nextId);
-    if (roundSeed !== null) {
-      setTargetRect(computeNextTargetRect(roundSeed, nextId));
-    }
+    if (roundSeed !== null) setTargetRect(computeNextTargetRect(roundSeed, nextId));
     lastSpawnAtRef.current = performance.now();
   }
 
   function onMiss() {
     if (phase === "ready") {
-      // false start
       setPhase("ended");
       return;
     }
@@ -586,381 +568,271 @@ if (!matchId) {
   const ms = Math.floor((timeLeftMs % 1000) / 10);
   const timeStr = `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${String(ms).padStart(2, "0")}`;
 
-  // ===== INSERT START: winner helpers (by winnerRunId) =====
-  const winnerRunId =
-    matchId && matchInfo?.status === "ended" && typeof matchInfo?.winnerRunId === "string"
-      ? String(matchInfo.winnerRunId)
-      : null;
-
-  const winnerPlayerId =
-    matchId && matchInfo?.status === "ended" && typeof matchInfo?.winnerPlayerId === "string"
-      ? String(matchInfo.winnerPlayerId)
-      : null;
-
-  function isWinnerRun(it: { id: string }) {
-    return winnerRunId !== null && it.id === winnerRunId;
-  }
-  // ===== INSERT END: winner helpers (by winnerRunId) =====
-
-  const myShortId = useMemo(() => {
-    const s = String(playerId || "");
-    return s.length > 10 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s;
-  }, [playerId]);
-
   const isEnded = !!matchId && String(matchInfo?.status || "") === "ended";
   const isMatchMissing = !!matchId && (matchPollError === "not_found" || matchPollError === "match_not_found");
 
   const effectiveCanPlay = !!canPlay && !isEnded && !isMatchMissing;
 
-    // ✅ Match mode: join matchmaking (once) and auto-start run only after match becomes started.
+  // ✅ Fullscreen during play + lock scroll
+  const isPlaying = phase === "ready" || phase === "go";
+    // ✅ real visible viewport height (mobile-safe). fixes "field extends downward"
+  const [vpH, setVpH] = useState<number | null>(null);
+
   useEffect(() => {
-    if (!matchId) return;
+    const vv = typeof window !== "undefined" ? window.visualViewport : null;
 
-    const st = String(matchInfo?.status || "");
+    const read = () => {
+      const h = vv?.height || window.innerHeight;
+      setVpH(Number.isFinite(h) ? Math.floor(h) : null);
+    };
 
-    if (st === "ended") {
-      // if match ended externally — don't try to verify
-      if (phase !== "ended") {
-        resultEmittedRef.current = true;
-        setServerVerify({ verified: false, reason: "match_ended" });
-        setPhase("ended");
-      }
-      return;
-    }
+    read();
 
-    
+    if (vv) vv.addEventListener("resize", read);
+    window.addEventListener("resize", read);
 
-    if (st === "started" && phase === "idle" && effectiveCanPlay) {
-      if (autoStartedForMatchRef.current !== matchId) {
-        autoStartedForMatchRef.current = matchId;
-        start();
-      }
-    }
-  }, [matchId, matchInfo?.status, phase, effectiveCanPlay, playerId]);
+    return () => {
+      if (vv) vv.removeEventListener("resize", read);
+      window.removeEventListener("resize", read);
+    };
+  }, []);
+  useEffect(() => {
+    if (!isPlaying) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [isPlaying]);
 
-  const matchTimeLeftMs = useMemo(() => {
-    if (!matchId) return null;
-    if (String(matchInfo?.status || "") !== "started") return null;
+  // ===== REPLACE START: match auto-join + autostart =====
+useEffect(() => {
+  if (!matchId) return;
 
-    const startedAt = Number(matchInfo?.startedAt);
-    if (!Number.isFinite(startedAt)) return null;
+  // 1) JOIN once per matchId
+  if (joinedMatchRef.current !== matchId) {
+    joinedMatchRef.current = matchId;
 
-    const duration = Number.isFinite(matchInfo?.durationMs) ? Number(matchInfo.durationMs) : 30_000;
-
-    const left = startedAt + duration - Date.now();
-    return Math.max(0, left);
-  }, [matchId, matchInfo?.status, matchInfo?.startedAt, matchInfo?.durationMs]);
-
-  const matchTimeLeftLabel = matchTimeLeftMs === null ? null : `${Math.ceil(matchTimeLeftMs / 1000)}s left`;
-
-  async function createNewMatchAndGo() {
-    try {
-      const r = await fetch("/api/match/create", { method: "POST" });
-      const data = await r.json();
-      const id = String(data?.match?.id || "").trim();
-      if (!id) {
-        alert("Create match failed: missing match.id");
-        return;
-      }
-      window.location.href = `/play?matchId=${encodeURIComponent(id)}`;
-    } catch (e) {
-      console.error(e);
-      alert("Create match failed (network). Check API is running.");
-    }
+    fetch(`/api/match/${encodeURIComponent(matchId)}/join`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        gameId: GAME_ID,
+        playerId,
+      }),
+    }).catch(() => {
+      // ignore; polling will still show match state
+    });
   }
 
-  return (
-    <div className="w-full">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-sm text-white/70">
-          {matchId && (
-            <div className="mb-4 rounded-3xl border border-white/10 bg-white/5 p-4">
-              <div className="text-xs text-white/60">Match</div>
-              <div className="mt-1 font-mono text-sm">{matchId}</div>
+  // 2) react to match state
+  const st = String(matchInfo?.status || "");
 
-              <div className="mt-1 text-sm text-white/70">
-                status:{" "}
-                <span className="font-mono text-white">
-                  {matchInfo?.status || (matchPollError ? matchPollError : "loading")}
-                </span>
+  if (st === "ended") {
+    if (phase !== "ended") {
+      resultEmittedRef.current = true;
+      setServerVerify({ verified: false, reason: "match_ended" });
+      setPhase("ended");
+    }
+    return;
+  }
 
-                {matchTimeLeftLabel && (
-                  <>
-                    {" "}
-                    · <span className="font-mono text-emerald-200">{matchTimeLeftLabel}</span>
-                  </>
-                )}
+  if (st === "started" && phase === "idle" && effectiveCanPlay) {
+    if (autoStartedForMatchRef.current !== matchId) {
+      autoStartedForMatchRef.current = matchId;
+      start();
+    }
+  }
+}, [matchId, matchInfo?.status, phase, effectiveCanPlay, playerId]);
+// ===== REPLACE END: match auto-join + autostart =====
 
-                {matchInfo?.status === "ended" && typeof matchInfo?.serverScore === "number" && (
-                  <>
-                    {" "}
-                    · winner score: <span className="font-semibold text-white">{matchInfo.serverScore}</span>
-                  </>
-                )}
-              </div>
+  // ==== UI building blocks ====
 
-              {isMatchMissing && (
-                <div className="mt-3">
-                  <a
-                    href="/lobby"
-                    className="inline-flex rounded-2xl border border-white/15 bg-white/5 px-4 py-2 text-sm text-white/90"
-                  >
-                    Go to Lobby
-                  </a>
-                </div>
-              )}
-
-              {/* ===== RUNS LIST ===== */}
-              <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 p-3">
-                <div className="text-xs text-white/60">Runs</div>
-
-                {runsLoading && <div className="mt-2 text-xs text-white/60">Loading…</div>}
-
-                {!runsLoading && runsError && <div className="mt-2 text-xs text-red-300">Error: {runsError}</div>}
-
-                {!runsLoading && !runsError && runs && runs.length === 0 && (
-                  <div className="mt-2 text-xs text-white/60">No runs yet.</div>
-                )}
-
-                {!runsLoading && !runsError && runs && runs.length > 0 && (
-                  <div className="mt-2 space-y-2">
-                    {(() => {
-                      const asc = [...runs].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-                      const rankById = new Map<string, number>();
-                      asc.forEach((it, i) => rankById.set(it.id, i + 1));
-
-                      return runs.slice(0, 10).map((it) => {
-                        const rank = rankById.get(it.id) ?? 0;
-                        const isWinner = isWinnerRun(it);
-                        const isMe = !!it.playerId && it.playerId === playerId;
-
-                        return (
-                          <div
-                            key={it.id}
-                            className={
-                              "flex items-center justify-between rounded-xl border px-3 py-2 " +
-                              (isWinner ? "border-yellow-400/40 bg-yellow-400/10" : "border-white/10 bg-white/5")
-                            }
-                          >
-                            <div className="text-xs text-white/70">
-                              <span className="font-mono text-white/80">#{rank}</span>
-
-                              {isMe && (
-                                <>
-                                  <span className="mx-2 text-white/30">·</span>
-                                  <span className="font-semibold text-emerald-200">you</span>
-                                </>
-                              )}
-
-                              {isWinner && (
-                                <>
-                                  <span className="mx-2 text-white/30">·</span>
-                                  <span className="font-semibold text-yellow-200">
-                                    🏆 winner{winnerPlayerId ? ` (${winnerPlayerId.slice(0, 6)}…)` : ""}
-                                  </span>
-                                </>
-                              )}
-
-                              <span className="mx-2 text-white/30">·</span>
-                              score <span className="font-semibold text-white">{it.serverScore}</span>
-                              <span className="mx-2 text-white/30">·</span>
-                              hits <span className="font-mono text-white/80">{it.hits}</span>
-                              <span className="mx-2 text-white/30">·</span>
-                              misses <span className="font-mono text-white/80">{it.misses}</span>
-
-                              {/* optional: show gameId if server returns it */}
-                              {it.gameId ? (
-                                <>
-                                  <span className="mx-2 text-white/30">·</span>
-                                  <span className="font-mono text-white/50">{it.gameId}</span>
-                                </>
-                              ) : null}
-                            </div>
-
-                            <div className="text-[11px] font-mono text-white/40">
-                              {new Date(it.createdAt).toLocaleTimeString()}
-                            </div>
-                          </div>
-                        );
-                      });
-                    })()}
-                  </div>
-                )}
-              </div>
-              {/* ===== END RUNS LIST ===== */}
-            </div>
-          )}
-
-          Time <span className="ml-2 font-mono text-white/50">you:{myShortId}</span>
-          {matchId ? <span className="ml-2 font-mono text-white/50">match:{matchId.slice(0, 8)}…</span> : null}
-        </div>
-
-        {/* ===== REPLACE START: right header (stable width) ===== */}
-        <div className="flex items-center gap-3">
-          {matchId ? (
-            <div className="text-xs text-white/60">
-              runs:{" "}
-              <span className="inline-block w-[88px] text-right font-mono text-white/70">
-                {runsLoading ? "loading…" : runsError ? runsError : runs ? String(runs.length) : "-"}
-              </span>
-            </div>
-          ) : null}
-
-          <div className="font-mono text-lg">{timeStr}</div>
-        </div>
-        {/* ===== REPLACE END: right header (stable width) ===== */}
+  const GhostHud = (
+    <div className="pointer-events-none absolute left-1/2 top-3 z-20 -translate-x-1/2 opacity-60">
+      <div className="flex items-center gap-2 rounded-full border border-white/10 bg-black/25 px-3 py-2 text-[11px] text-white/70 backdrop-blur">
+        <span className="font-mono text-white/80">{timeStr}</span>
+        <span className="text-white/40">{matchId ? "match" : "solo"}</span>
+        <span className="ml-2 text-white/40">•</span>
+        <span>
+          hits <span className="text-white/90">{hits}</span>
+        </span>
+        <span className="text-white/40">•</span>
+        <span>
+          score <span className="text-white/90">{score}</span>
+        </span>
       </div>
+    </div>
+  );
 
-      <div className="mt-3 grid grid-cols-4 gap-3 text-center">
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-          <div className="text-xs text-white/60">Hits</div>
-          <div className="text-lg font-semibold">{hits}</div>
-        </div>
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-          <div className="text-xs text-white/60">Misses</div>
-          <div className="text-lg font-semibold">{misses}</div>
-        </div>
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-          <div className="text-xs text-white/60">Avg ms</div>
-          <div className="text-lg font-semibold">{avgReactionMs === null ? "-" : Math.round(avgReactionMs)}</div>
-        </div>
+  const Target = targetRect ? (
+    <button
+      type="button"
+      aria-label="Tap target"
+      onPointerDown={onHit}
+      className="absolute rounded-full border border-white/20 active:scale-95"
+      style={{
+        left: targetRect.left,
+        top: targetRect.top,
+        width: targetRect.width,
+        height: targetRect.height,
+        touchAction: "none",
+        background:
+          "radial-gradient(circle at 30% 25%, rgba(255,255,255,0.92) 0%, rgba(255,255,255,0.35) 16%, rgba(255,255,255,0) 40%), linear-gradient(135deg, rgba(255,46,144,0.98), rgba(168,85,247,0.98))",
+        boxShadow:
+          "0 14px 34px rgba(168,85,247,0.40), 0 0 46px rgba(255,46,144,0.30), inset 0 3px 14px rgba(255,255,255,0.28)",
+      }}
+    />
+  ) : null;
 
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-          <div className="text-xs text-white/60">Score</div>
-          <div className="text-lg font-semibold">{score}</div>
+  const Field = (
+    <div
+  ref={containerRef}
+  className={
+    "relative w-full overflow-hidden bg-gradient-to-b from-white/6 to-black " +
+    (isPlaying ? "rounded-none" : "h-[62vh] min-h-[460px] rounded-3xl border border-white/10")
+  }
+  style={
+    isPlaying
+      ? {
+          height: vpH ? `${vpH}px` : "100vh",
+          width: "100vw",
+        }
+      : undefined
+  }
+  onPointerDown={onMiss}
+>
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(900px_520px_at_50%_-10%,rgba(168,85,247,0.18),transparent_60%)]" />
+
+      {GhostHud}
+
+      {Target}
+
+      {phase === "go" && (
+        <div className="pointer-events-none absolute left-1/2 top-16 z-20 -translate-x-1/2 rounded-full border border-white/10 bg-white/10 px-4 py-1 text-sm font-semibold text-white/90 backdrop-blur">
+          GO!
         </div>
-      </div>
+      )}
 
-      <div
-        ref={containerRef}
-        className="relative mt-4 h-[62vh] w-full overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-b from-white/5 to-black"
-        onPointerDown={onMiss}
-      >
-        {targetRect && (
-          <button
-            type="button"
-            aria-label="Tap target"
-            onPointerDown={onHit}
-            className="absolute rounded-full border border-white/20 bg-white/15 backdrop-blur active:scale-95"
-            style={{
-              left: targetRect.left,
-              top: targetRect.top,
-              width: targetRect.width,
-              height: targetRect.height,
-              touchAction: "none",
-            }}
-          />
-        )}
+      {phase === "ready" && (
+        <div className="absolute inset-0 z-30 grid place-items-center">
+          <div className="rounded-[28px] border border-white/10 bg-black/60 p-6 text-center shadow-[0_30px_110px_rgba(0,0,0,0.75)] backdrop-blur">
+            <div className="text-sm text-white/70">Get ready…</div>
+            <div className="mt-1 text-2xl font-semibold">Wait for GO</div>
+            <div className="mt-3 text-xs text-white/60">Don’t tap early.</div>
+          </div>
+        </div>
+      )}
 
-        {phase === "idle" && (
-          <div className="absolute inset-0 grid place-items-center">
+      {phase === "idle" && (
+        <div className="absolute inset-0 z-40 grid place-items-center">
+          <div className="w-[86%] max-w-[360px] rounded-[28px] border border-white/10 bg-black/55 p-5 text-center shadow-[0_30px_110px_rgba(0,0,0,0.75)] backdrop-blur">
+            <div className="text-[18px] font-semibold">Ready?</div>
+            <div className="mt-2 text-sm text-white/70">Tap targets as fast as you can.</div>
+
             <button
               type="button"
-              onClick={start}
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                start();
+              }}
               disabled={!effectiveCanPlay}
               className={
-                "rounded-2xl px-6 py-3 font-medium " +
-                (effectiveCanPlay ? "bg-white text-black" : "cursor-not-allowed bg-white/20 text-white/50")
+                "mt-5 w-full rounded-2xl px-5 py-3 text-sm font-semibold " +
+                (effectiveCanPlay ? "bg-white text-black" : "cursor-not-allowed bg-white/20 text-white/60")
               }
             >
               {effectiveCanPlay
-                ? "Start 30s Run"
+                ? "Start"
                 : isMatchMissing
-                ? "Match not found — go to Lobby"
+                ? "Match not found"
                 : isEnded
-                ? "Match ended — create a new match"
-                : "Waiting for match start…"}
+                ? "Match ended"
+                : "Waiting…"}
             </button>
-          </div>
-        )}
 
-        {phase === "ready" && (
-          <div className="absolute inset-0 grid place-items-center">
-            <div className="rounded-3xl border border-white/10 bg-black/60 p-6 text-center backdrop-blur">
-              <div className="text-sm text-white/70">Get ready…</div>
-              <div className="mt-1 text-2xl font-semibold">Wait for GO</div>
-              <div className="mt-3 text-xs text-white/60">Don’t tap early.</div>
+            {matchId ? (
+              <div className="mt-3 text-[11px] text-white/50">Match mode starts automatically when ready.</div>
+            ) : (
+              <div className="mt-3 text-[11px] text-white/50">Practice rewards 💎 after the run.</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {phase === "ended" && (
+        <div className="absolute inset-0 z-50 grid place-items-center">
+          <div className="w-[86%] max-w-[360px] rounded-[28px] border border-white/10 bg-black/60 p-6 text-center shadow-[0_30px_110px_rgba(0,0,0,0.75)] backdrop-blur">
+            <div className="text-sm text-white/70">Run finished</div>
+            <div className="mt-1 text-3xl font-semibold">{score}</div>
+            <div className="mt-1 text-xs text-white/60">Score</div>
+
+            {practiceRewardGems !== null ? (
+              <div className="mt-3 text-sm font-semibold text-emerald-200">+{practiceRewardGems} 💎 earned</div>
+            ) : null}
+
+            {serverVerify && !matchId ? <div className="mt-2 text-xs text-white/60">Verified ✅</div> : null}
+
+            <div className="mt-5 flex flex-col gap-2">
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  start();
+                }}
+                disabled={isEnded}
+                className={
+                  "w-full rounded-2xl px-5 py-3 text-sm font-semibold " +
+                  (isEnded ? "cursor-not-allowed bg-white/20 text-white/60" : "bg-white text-black")
+                }
+              >
+                {isEnded ? "Match ended" : "Play again"}
+              </button>
+
+              <a
+                href="/games"
+                className="w-full rounded-2xl border border-white/15 bg-white/10 px-5 py-3 text-sm font-semibold text-white"
+              >
+                Back to Games
+              </a>
             </div>
           </div>
-        )}
+        </div>
+      )}
+    </div>
+  );
 
-        {phase === "go" && (
-          <div className="pointer-events-none absolute left-1/2 top-5 -translate-x-1/2 rounded-full border border-white/10 bg-white/10 px-4 py-1 text-sm font-semibold text-white/90 backdrop-blur">
-            GO!
-          </div>
-        )}
+  // ✅ When playing: fullscreen field only (no top blocks)
+    if (isPlaying) {
+    return createPortal(
+      <div
+        style={{
+          position: "fixed",
+          inset: 0,
+          zIndex: 999999,
+          background: "black",
+        }}
+      >
+        {Field}
+      </div>,
+      document.body
+    );
+  }
 
-        {phase === "ended" && (
-          <div className="absolute inset-0 grid place-items-center">
-            <div className="rounded-3xl border border-white/10 bg-black/60 p-6 text-center backdrop-blur">
-              <div className="text-sm text-white/70">Run finished</div>
-              <div className="mt-1 text-2xl font-semibold">Score: {score}</div>
-
-              {serverVerify && (
-                <div className="mt-2 text-sm text-white/70">
-                  {serverVerify.verified ? (
-                    <>
-                      Verified ✅ · Server score:{" "}
-                      <span className="font-semibold text-white">{serverVerify.serverScore}</span>
-                    </>
-                  ) : serverVerify.reason === "match_ended" ? (
-                    <>
-                      Too late ❌ · <span className="font-semibold text-red-200">Match already ended</span>
-                    </>
-                  ) : (
-                    <>
-                      Not verified ❌ · Reason:{" "}
-                      <span className="font-mono text-white">{serverVerify.reason || "unknown"}</span>
-                    </>
-                  )}
-                </div>
-              )}
-                            {practiceRewardGems !== null ? (
-                <div className="mt-2 text-sm text-emerald-200">
-                  +{practiceRewardGems} 💎 (Practice reward)
-                </div>
-              ) : null}
-
-
-              <div className="mt-3 text-sm text-white/60">
-                Hits: {hits} · Misses: {misses}
-              </div>
-
-              <div className="mt-5 flex flex-wrap justify-center gap-3">
-                <button
-                  type="button"
-                  onClick={start}
-                  disabled={isEnded}
-                  className={
-                    "rounded-2xl px-5 py-2 font-medium " +
-                    (isEnded ? "cursor-not-allowed bg-white/20 text-white/60" : "bg-white text-black")
-                  }
-                >
-                  {isEnded ? "Match ended" : "Play again"}
-                </button>
-
-                <a href="/lobby" className="rounded-2xl border border-white/15 px-5 py-2 text-white/90">
-                  Back to Lobby
-                </a>
-
-                {isEnded && (
-                  <button
-                    type="button"
-                    onClick={createNewMatchAndGo}
-                    className="rounded-2xl bg-white px-5 py-2 font-medium text-black"
-                  >
-                    Create new match
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      <p className="mt-3 text-xs text-white/50">
-        MVP: deterministic target movement (no RNG). Next: match binding + server storage.
-      </p>
+  // ✅ Normal (not playing): keep regular block layout
+  return (
+    <div className="w-full">
+      {Field}
     </div>
   );
 }
