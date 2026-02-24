@@ -2,7 +2,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { readLeaderboard, subscribeLeaderboard } from "@/lib/leaderboard";
 import { apiCreateMatch } from "@/lib/matchApi";
@@ -27,7 +27,7 @@ function writeMatchId(id: string | null) {
   } catch {}
 }
 
-export default function LobbyPage() {
+function LobbyPageInner() {
   const router = useRouter();
   const sp = useSearchParams();
 
@@ -287,6 +287,21 @@ export default function LobbyPage() {
         </div>
       </div>
     </main>
+  );
+}
+export default function LobbyPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen bg-black text-white">
+          <div className="mx-auto flex max-w-xl flex-col px-6 py-12">
+            <div className="text-sm text-white/70">Loading…</div>
+          </div>
+        </main>
+      }
+    >
+      <LobbyPageInner />
+    </Suspense>
   );
 }
 // ===== FILE END: apps/web/app/(public)/lobby/page.tsx =====

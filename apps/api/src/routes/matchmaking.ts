@@ -1,5 +1,17 @@
 // ===== FILE START: apps/api/src/routes/matchmaking.ts =====
 import type { FastifyInstance } from "fastify";
+// ===== INSERT START: dev helpers =====
+import { fundWallet } from "../services/wallet.service.js";
+
+function isProd() {
+  return String(process.env.NODE_ENV || "").toLowerCase() === "production";
+}
+
+function needPlayersFromBody(body: any) {
+  const n = Number(body?.players || body?.playerCount || 2);
+  return n === 4 || n === 8 ? n : 2;
+}
+// ===== INSERT END: dev helpers =====
 
 // простая in-memory очередь (MVP). Для продакшена позже заменим на Redis/Postgres.
 type QueueKey = string;
@@ -97,54 +109,106 @@ export async function registerMatchmakingRoutes(app: FastifyInstance) {
     }
 
     // 2) иначе — создаём матч и ставим ставку, кладём в ожидание
-    const createRes = await app.inject({
-      method: "POST",
-      url: "/match/create",
-      payload: { gameId },
-      headers: { "content-type": "application/json", accept: "application/json" },
-    });
+const createRes = await app.inject({
+  method: "POST",
+  url: "/match/create",
+  payload: { gameId },
+  headers: { "content-type": "application/json", accept: "application/json" },
+});
 
-    const created: any = createRes.json();
+const created: any = createRes.json();
 
-    const matchId = String(created?.match?.id || created?.id || "").trim();
-    if (createRes.statusCode >= 400 || !matchId) {
-      return reply.code(500).send({ ok: false, error: "create_match_failed" });
-    }
+const matchId = String(created?.match?.id || created?.id || "").trim();
+if (createRes.statusCode >= 400 || !matchId) {
+  return reply.code(500).send({ ok: false, error: "create_match_failed" });
+}
 
-    const stakeRes = await app.inject({
+const stakeRes = await app.inject({
+  method: "POST",
+  url: `/match/${encodeURIComponent(matchId)}/stake`,
+  payload: { playerId, amount: entry, currency: "USD", gameId },
+  headers: { "content-type": "application/json", accept: "application/json" },
+});
+
+const j: any = stakeRes.json();
+
+if (stakeRes.statusCode >= 400 || j?.ok === false) {
+  return reply.code(500).send({
+    ok: false,
+    error: "stake_failed_on_new_match",
+    reason: j?.error || j?.reason || String(stakeRes.statusCode),
+  });
+}
+
+// ===== INSERT START: DEV auto-fill bots + auto-start =====
+const players = needPlayersFromBody(body);
+
+if (!isProd()) {
+  const needBots = Math.max(0, players - 1);
+
+  for (let i = 0; i < needBots; i++) {
+    const botId = `bot_${players}_${i + 1}`;
+
+    // give bot dev money and stake it
+    fundWallet(botId, 9999, "USD");
+
+    const botStakeRes = await app.inject({
       method: "POST",
       url: `/match/${encodeURIComponent(matchId)}/stake`,
-      payload: { playerId, amount: entry, currency: "USD", gameId },
+      payload: { playerId: botId, amount: entry, currency: "USD", gameId },
       headers: { "content-type": "application/json", accept: "application/json" },
     });
 
-    const j: any = stakeRes.json();
-
-    if (stakeRes.statusCode >= 400 || j?.ok === false) {
+    const bj: any = botStakeRes.json();
+    if (botStakeRes.statusCode >= 400 || bj?.ok === false) {
       return reply.code(500).send({
         ok: false,
-        error: "stake_failed_on_new_match",
-        reason: j?.error || j?.reason || String(stakeRes.statusCode),
+        error: "bot_stake_failed",
+        reason: bj?.error || bj?.reason || String(botStakeRes.statusCode),
       });
     }
+  }
 
-    WAITING_BY_KEY.set(key, {
-      key,
-      matchId,
-      createdAt: now(),
-      gameId,
-      mode,
-      currency,
-      entry,
-    });
+  // now start match
+  const startRes = await app.inject({
+    method: "POST",
+    url: `/match/${encodeURIComponent(matchId)}/start`,
+    payload: {},
+    headers: { "content-type": "application/json", accept: "application/json" },
+  });
 
+  const sj: any = startRes.json();
+
+  // even if cannot start, we still return created_waiting to not break flow
+  if (startRes.statusCode < 400 && sj?.match) {
     return reply.send({
       ok: true,
-      action: "created_waiting",
+      action: "created_started_dev",
       matchId,
-      match: j?.match || null,
+      match: sj.match,
       wallet: j?.wallet || null,
     });
+  }
+}
+// ===== INSERT END: DEV auto-fill bots + auto-start =====
+
+WAITING_BY_KEY.set(key, {
+  key,
+  matchId,
+  createdAt: now(),
+  gameId,
+  mode,
+  currency,
+  entry,
+});
+
+return reply.send({
+  ok: true,
+  action: "created_waiting",
+  matchId,
+  match: j?.match || null,
+  wallet: j?.wallet || null,
+});
   });
 
   // POST /matchmaking/cancel
