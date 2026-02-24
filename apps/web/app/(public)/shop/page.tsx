@@ -1,7 +1,7 @@
 // ===== FILE START: apps/web/app/(public)/shop/page.tsx =====
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { readPlayer, updatePlayer } from "@/lib/playerStore";
 
@@ -100,6 +100,14 @@ function pickBestIndex(values: number[], needAmount: number) {
 }
 
 export default function ShopPage() {
+  return (
+    <Suspense fallback={null}>
+      <ShopInner />
+    </Suspense>
+  );
+}
+
+function ShopInner() {
   const router = useRouter();
   const sp = useSearchParams();
 
@@ -181,7 +189,7 @@ export default function ShopPage() {
     toastT.current = window.setTimeout(() => setToast(null), 1600);
   }
 
-    function goBackAfterBuy(delayMs = 350) {
+  function goBackAfterBuy(delayMs = 350) {
     if (!returnTo) return;
     // let toast flash briefly
     window.setTimeout(() => router.push(returnTo), delayMs);
@@ -228,7 +236,7 @@ export default function ShopPage() {
   return (
     <main className="min-h-screen text-white">
       <div className="min-h-screen bg-[radial-gradient(1200px_800px_at_50%_-200px,rgba(255,255,255,0.18),transparent_60%),linear-gradient(180deg,#6b21a8_0%,#3b0a7a_40%,#170027_100%)]">
-                <div className="mx-auto flex max-w-md flex-col px-4 pb-28 pt-4">
+        <div className="mx-auto flex max-w-md flex-col px-4 pb-28 pt-4">
           {returnTo ? (
             <div className="mb-3">
               <button
@@ -356,7 +364,12 @@ export default function ShopPage() {
                   ) : null}
 
                   {badge ? (
-                    <div className={cn("absolute left-2 top-2 rounded-full px-2 py-1 text-[10px] font-extrabold", badgeTone)}>
+                    <div
+                      className={cn(
+                        "absolute left-2 top-2 rounded-full px-2 py-1 text-[10px] font-extrabold",
+                        badgeTone
+                      )}
+                    >
                       {badge}
                     </div>
                   ) : null}
@@ -408,7 +421,12 @@ export default function ShopPage() {
                   ) : null}
 
                   {p.badge ? (
-                    <div className={cn("absolute left-2 top-2 rounded-full px-2 py-1 text-[10px] font-extrabold", p.badgeTone)}>
+                    <div
+                      className={cn(
+                        "absolute left-2 top-2 rounded-full px-2 py-1 text-[10px] font-extrabold",
+                        p.badgeTone
+                      )}
+                    >
                       {p.badge}
                     </div>
                   ) : null}
@@ -440,7 +458,7 @@ export default function ShopPage() {
             <span className="font-extrabold">Mastercard</span>
           </div>
 
-                    {/* support / promo / withdraw */}
+          {/* support / promo / withdraw */}
           <div className="mt-6 flex flex-col gap-3">
             {[
               { key: "help", title: "Need Help?", subtitle: "Tap here to contact support", ico: "👤" as const },

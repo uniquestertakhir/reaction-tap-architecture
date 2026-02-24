@@ -3,28 +3,30 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
 
-type Ctx = { params: { id: string } };
+type Ctx = { params: Promise<{ id: string }> };
 
+// ===== INSERT START: getApiBase =====
 function getApiBase(): string {
-  // Поддержка разных имён env без ломания
   const v =
     process.env.NEXT_PUBLIC_API_BASE_URL ||
     process.env.API_BASE_URL ||
     process.env.NEXT_PUBLIC_API_URL ||
     process.env.API_URL ||
     "http://localhost:3001";
+
   return v.replace(/\/+$/, "");
 }
+// ===== INSERT END: getApiBase =====
 
 export async function POST(req: NextRequest, ctx: Ctx) {
-  const id = String(ctx?.params?.id || "").trim();
+  const p = await ctx.params;
+  const id = String(p?.id || "").trim();
   if (!id) {
     return NextResponse.json({ ok: false, error: "Missing match id" }, { status: 400 });
   }
 
   const apiBase = getApiBase();
 
-  // пробрасываем тело как есть (если есть)
   const contentType = req.headers.get("content-type") || "";
   const bodyText = await req.text().catch(() => "");
 
@@ -44,7 +46,6 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
   const text = await upstream.text().catch(() => "");
 
-  // возвращаем ответ апстрима как есть
   return new Response(text, {
     status: upstream.status,
     headers: {

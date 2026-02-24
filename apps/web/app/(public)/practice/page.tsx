@@ -2,13 +2,13 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import GameCanvas from "@/components/game/GameCanvas";
 
 type EndResult = { win?: boolean; score?: number; ms?: number };
 
-export default function PracticePage() {
+function PracticeInner() {
   const sp = useSearchParams();
   const mode = (sp.get("mode") || "warm-up").trim();
   const gameId = (sp.get("gameId") || "reaction-tap").trim();
@@ -38,9 +38,7 @@ export default function PracticePage() {
           </div>
 
           <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-4">
-            <div className="text-sm text-white/80">
-              Solo practice. No stakes. Just play.
-            </div>
+            <div className="text-sm text-white/80">Solo practice. No stakes. Just play.</div>
             <div className="mt-2 text-xs text-white/50">
               {gameId} • mode: {modeLabel}
             </div>
@@ -97,14 +95,20 @@ export default function PracticePage() {
                 </Link>
               </div>
 
-              <div className="mt-3 text-[11px] text-white/50">
-                Tip: Practice rewards 💎 (see HUD gems).
-              </div>
+              <div className="mt-3 text-[11px] text-white/50">Tip: Practice rewards 💎 (see HUD gems).</div>
             </div>
           </div>
         )}
       </div>
     </main>
+  );
+}
+
+export default function PracticePage() {
+  return (
+    <Suspense fallback={null}>
+      <PracticeInner />
+    </Suspense>
   );
 }
 // ===== FILE END: apps/web/app/(public)/practice/page.tsx =====
