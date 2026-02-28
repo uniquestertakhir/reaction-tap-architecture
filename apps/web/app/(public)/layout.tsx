@@ -11,16 +11,18 @@ export default function PublicLayout({ children }: { children: ReactNode }) {
   const path = usePathname() || "/";
 
   const isMenuScreen =
-    path === "/games" ||
-    path.startsWith("/games/") ||
-    path === "/shop" ||
-    path.startsWith("/shop/") ||
-    path === "/results" ||
-    path.startsWith("/results/") ||
-    path === "/rewards" ||
-    path.startsWith("/rewards/") ||
-    path === "/leagues" ||
-    path.startsWith("/leagues/");
+  path === "/games" ||
+  path.startsWith("/games/") ||
+  path === "/shop" ||
+  path.startsWith("/shop/") ||
+  path === "/results" ||
+  path.startsWith("/results/") ||
+  path === "/rewards" ||
+  path.startsWith("/rewards/") ||
+  path === "/leagues" ||
+  path.startsWith("/leagues/") ||
+  path === "/settings" ||
+  path.startsWith("/settings/");
 
   if (isMenuScreen) {
     return (

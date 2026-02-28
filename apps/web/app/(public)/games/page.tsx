@@ -20,9 +20,17 @@ const GAMES: GameTile[] = [
     id: "reaction-tap",
     title: "Reaction Tap",
     subtitle: "Tap-fast skill game",
-    href: "/games/reaction-tap", // details page (optional), but main CTAs are on tile now
+    href: "/games/reaction-tap",
     className:
       "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.22),transparent_60%),linear-gradient(135deg,rgba(124,58,237,0.65),rgba(17,24,39,0.35))]",
+  },
+  {
+    id: "block-puzzle",
+    title: "Block Puzzle",
+    subtitle: "Block Blast-style",
+    href: "/games/block-puzzle",
+    className:
+      "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.20),transparent_60%),linear-gradient(135deg,rgba(59,130,246,0.40),rgba(17,24,39,0.35))]",
   },
   {
     id: "bingo",
