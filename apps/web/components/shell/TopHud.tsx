@@ -175,8 +175,8 @@ const cash = `$${player.cash.toFixed(2)}`;
               <div className="mt-1 font-semibold">VIBRANTPANDA257</div>
             </div>
             <div className="h-px bg-white/10" />
-
-            <Link
+         
+<Link
   href="/profile"
   onClick={() => setProfileOpen(false)}
   className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-white/10"
@@ -231,6 +231,7 @@ const cash = `$${player.cash.toFixed(2)}`;
   </span>
   <span className="text-xs text-white/70">→</span>
 </Link>
+
           </div>
         </div>,
         document.body

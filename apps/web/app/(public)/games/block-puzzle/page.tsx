@@ -2,12 +2,14 @@
 "use client";
 
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   readAudioSettings,
   onAudioSettingsChanged,
   type AudioSettings,
 } from "@/lib/platform/audioSettings";
+import { useRouter } from "next/navigation";
 
 type Cell = string | null; // store color per cell
 
@@ -310,6 +312,15 @@ const [fxId, setFxId] = useState(0);
 const [fxCells, setFxCells] = useState<Array<{ x: number; y: number }>>([]);
 const fxTimer = useRef<number | null>(null);
 
+// ✅ Impact FX (shake + bloom) on clear
+const [impactId, setImpactId] = useState(0);
+const [impactOn, setImpactOn] = useState(false);
+const impactT = useRef<number | null>(null);
+
+// ✅ premium prismatic sweep (rows/cols beams)
+const [fxLines, setFxLines] = useState<{ id: number; rows: number[]; cols: number[] } | null>(null);
+const fxLinesT = useRef<number | null>(null);
+
 // ✅ Magnet “bounce + shine” FX when snap becomes valid / changes cell
 const [magnetFx, setMagnetFx] = useState<{
   id: number;
@@ -418,6 +429,22 @@ function triggerMagnetFx(piece: Piece, x: number, y: number) {
       } catch {}
     }
   }, [score, best]);
+    // ✅ Immersive fullscreen feel on mobile: no page scroll, no rubber-band
+  useEffect(() => {
+    const prevHtmlOverflow = document.documentElement.style.overflow;
+    const prevBodyOverflow = document.body.style.overflow;
+    const prevBodyOverscroll = (document.body.style as any).overscrollBehaviorY;
+
+    document.documentElement.style.overflow = "hidden";
+    document.body.style.overflow = "hidden";
+    (document.body.style as any).overscrollBehaviorY = "none";
+
+    return () => {
+      document.documentElement.style.overflow = prevHtmlOverflow;
+      document.body.style.overflow = prevBodyOverflow;
+      (document.body.style as any).overscrollBehaviorY = prevBodyOverscroll;
+    };
+  }, []);
 
 
   useEffect(() => {
@@ -474,19 +501,26 @@ useEffect(() => {
   const m = boardMetrics();
   if (!m) return null;
 
+  // ✅ IMPORTANT:
+  // Ghost is visually lifted above the finger (DRAG_LIFT_PX),
+  // so snap must be computed from the "ghost center", not the finger.
+  const liftPx = m.cellH * 2.6; // matches DRAG_LIFT_PX factor
+  const aimX = clientX;
+  const aimY = clientY - liftPx;
+
   // ✅ smaller pad: less “teleport” from far away
   const pad = Math.min(m.width, m.height) * 0.06;
 
   const insideOrNear =
-    clientX >= m.left - pad &&
-    clientX <= m.left + m.width + pad &&
-    clientY >= m.top - pad &&
-    clientY <= m.top + m.height + pad;
+    aimX >= m.left - pad &&
+    aimX <= m.left + m.width + pad &&
+    aimY >= m.top - pad &&
+    aimY <= m.top + m.height + pad;
 
   if (!insideOrNear) return null;
 
-  const clampedX = clamp(clientX, m.left, m.left + m.width);
-  const clampedY = clamp(clientY, m.top, m.top + m.height);
+  const clampedX = clamp(aimX, m.left, m.left + m.width);
+  const clampedY = clamp(aimY, m.top, m.top + m.height);
 
   const px = clampedX - m.left;
   const py = clampedY - m.top;
@@ -498,9 +532,9 @@ useEffect(() => {
 
   const pb = pieceBounds(piece.blocks);
 
-// ✅ clamp with piece size (so near-edge snaps can still be valid)
-const idealX = clamp(Math.round(targetCellX - cx), 0, GRID - pb.w);
-const idealY = clamp(Math.round(targetCellY - cy), 0, GRID - pb.h);
+  // ✅ clamp with piece size (so near-edge snaps can still be valid)
+  const idealX = clamp(Math.round(targetCellX - cx), 0, GRID - pb.w);
+  const idealY = clamp(Math.round(targetCellY - cy), 0, GRID - pb.h);
 
   // ✅ smaller radius
   const R = 1;
@@ -562,14 +596,29 @@ const pendingMove = useRef<{
   function beginDrag(pieceId: string, e: React.PointerEvent) {
   if (gameOver) return;
 
+  // ✅ stop browser from doing “native” gestures/dragging
+  e.preventDefault();
+  e.stopPropagation();
+
+  // ✅ hard capture pointer so we always keep receiving moves/up
+  try {
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  } catch {}
+
   // ✅ unlock audio only if global in-game sounds are enabled
   if (audioSettings.inGameSounds) ensureAudio();
 
+  // ✅ ensure board cell size is known BEFORE ghost renders
+  const m = boardMetrics();
+  if (m) setBoardW(Math.floor(m.width));
+
   const pointerId = e.pointerId;
-  const p = pieces.find((x) => x.id === pieceId);
+  const p = piecesRef.current.find((x) => x.id === pieceId);
   if (!p) return;
 
-  // capture on window via listeners (so it never breaks outside board)
+  // reset magnet memory for this drag
+  lastMagnetCellRef.current = null;
+
   setDrag({
     active: true,
     pieceId,
@@ -725,12 +774,24 @@ setDrag({ active: false });
       for (const ry of cleared.rows) for (let x = 0; x < GRID; x++) cells.push({ x, y: ry });
       for (const cx of cleared.cols) for (let y = 0; y < GRID; y++) cells.push({ x: cx, y });
 
-      setFxId((v) => v + 1);
+            setFxId((v) => v + 1);
       setFxCells(cells);
+
+      // ✅ beams (rows/cols)
+      setFxLines({ id: Date.now(), rows: cleared.rows, cols: cleared.cols });
+      if (fxLinesT.current) window.clearTimeout(fxLinesT.current);
+      fxLinesT.current = window.setTimeout(() => setFxLines(null), 260);
+
       if (fxTimer.current) window.clearTimeout(fxTimer.current);
-      fxTimer.current = window.setTimeout(() => setFxCells([]), 420);
-            if (audioSettings.inGameSounds) playWhoosh();
+      fxTimer.current = window.setTimeout(() => setFxCells([]), 360);
+
+      if (audioSettings.inGameSounds) playWhoosh();
       if (audioSettings.haptics) haptic([10, 30, 18]);
+            // ✅ premium impact (very short)
+      setImpactId((v) => v + 1);
+      setImpactOn(true);
+      if (impactT.current) window.clearTimeout(impactT.current);
+      impactT.current = window.setTimeout(() => setImpactOn(false), 180);
     }
 
     setBoard(cleared.board);
@@ -748,18 +809,17 @@ setDrag({ active: false });
   // ========= RENDER HELPERS =========
 
   const cellPx = boardW ? boardW / GRID : 36;
+    // ✅ lift dragged piece above finger (2–3 cells)
+  const DRAG_LIFT_PX = cellPx * 2.6;
 
 // ✅ tray cells even smaller to prevent overlap between slots
 const trayCell = clamp(Math.floor(cellPx * 0.58), 16, 30);
 
   const displayBoard = useMemo(() => {
-  const snap = getSnap(drag);
-  // While dragging: if snapped and ok -> render as already placed (sticks)
-  if (!drag.active) return board;
-  if (!draggingPiece) return board;
-  if (!snap || !snap.ok) return board;
-  return applyPiece(board, draggingPiece, snap.x, snap.y);
-}, [board, drag, draggingPiece]);
+  // ✅ never “pre-place” on board while dragging
+  // the ghost piece is the only visual during drag
+  return board;
+}, [board]);
 
 // cells where dragging piece overlaps already-filled cells (invalid placement feedback)
 const overlaps = useMemo(() => {
@@ -804,39 +864,25 @@ const clearHint = useMemo(() => {
   return { rows, cols, cells };
 }, [board, drag, draggingPiece]);
 
-  // Ghost piece follows finger, but stays SOLID and never disappears
+    // Ghost piece follows finger (ALWAYS lifted above finger; no snapped jump under finger)
   const ghost = useMemo(() => {
-  if (!drag.active) return null;
-  if (!draggingPiece) return null;
+    if (!drag.active) return null;
+    if (!draggingPiece) return null;
 
-  // If over board: ghost should “stick” on grid (so it looks like it’s already landing)
-  const snap = getSnap(drag);
-  const m = boardMetrics();
+    const b = pieceBounds(draggingPiece.blocks);
+    const w = b.w * cellPx;
+    const h = b.h * cellPx;
 
-    // ✅ snap визуально только когда реально можно поставить (иначе бывают скачки в (0,0))
-  if (snap && m && snap.ok) {
-    const xPx = m.left + snap.x * m.cellW;
-    const yPx = m.top + snap.y * m.cellH;
+    const liftedTop = drag.clientY - h * 0.5 - DRAG_LIFT_PX;
+
     return {
-      mode: "snapped" as const,
-      left: xPx,
-      top: yPx,
+      mode: "free" as const,
+      left: drag.clientX - w * 0.5,
+      top: Math.max(8, liftedTop),
       ok: true,
     };
-  }
-
-  // Outside board: free-follow finger
-  const b = pieceBounds(draggingPiece.blocks);
-  const w = b.w * cellPx;
-  const h = b.h * cellPx;
-  return {
-    mode: "free" as const,
-    left: drag.clientX - w * 0.5,
-    top: drag.clientY - h * 0.5,
-    ok: true,
-  };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [drag, draggingPiece, cellPx]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drag, draggingPiece, cellPx]);
 useEffect(() => {
   // stop if not dragging
   if (!drag.active || !ghost) {
@@ -895,489 +941,768 @@ useEffect(() => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [drag.active, ghost?.left, ghost?.top]);
 
-  return (
-    <main className="min-h-screen text-white">
-      <style jsx global>{`
-  @keyframes bp-pop {
-    0% { transform: scale(0.98); opacity: 0.0; }
-    15% { opacity: 1; }
-    100% { transform: scale(1.26); opacity: 0; }
-  }
+  // ✅ Mode select (same idea as Reaction Tap variants)
+  const sp = useSearchParams();
+  const router = useRouter();
+  const mode = (sp.get("mode") || "").trim(); // "cash" | "gems" | "practice"
+  const entry = (sp.get("entry") || "").trim();
+  const prize = (sp.get("prize") || "").trim();
+  const isInGame = Boolean(mode); // mode exists => the game is running
 
-  @keyframes bp-shine {
-    0% { opacity: 0; transform: translateX(-35%); }
-    30% { opacity: 0.55; }
-    100% { opacity: 0; transform: translateX(35%); }
-  }
-
-  @keyframes bp-drop {
-    0% { transform: scale(0.98); }
-    60% { transform: scale(1.02); }
-    100% { transform: scale(1); }
-  }
-
-  @keyframes bp-shake {
-    0% { transform: translateX(0); }
-    25% { transform: translateX(-4px); }
-    50% { transform: translateX(4px); }
-    75% { transform: translateX(-3px); }
-    100% { transform: translateX(0); }
-  }
-
-  @keyframes bp-warn {
-    0% { transform: scale(1); filter: brightness(1); opacity: 0.85; }
-    45% { transform: scale(1.06); filter: brightness(1.25); opacity: 1; }
-    100% { transform: scale(1); filter: brightness(1.05); opacity: 0.9; }
-  }
-
-  @keyframes bp-clear {
-    0% { opacity: 0.55; filter: brightness(1); transform: scale(1); }
-    45% { opacity: 0.95; filter: brightness(1.35); transform: scale(1.03); }
-    100% { opacity: 0.7; filter: brightness(1.1); transform: scale(1); }
-  }
-
-  @keyframes bp-lineGlow {
-    0% { opacity: 0.0; filter: blur(2px); transform: scaleX(0.92); }
-    35% { opacity: 0.55; filter: blur(1px); transform: scaleX(1); }
-    100% { opacity: 0.15; filter: blur(2px); transform: scaleX(1); }
-  }
-`}</style>
-
-      <div className="min-h-screen bg-[radial-gradient(1200px_700px_at_50%_-120px,rgba(255,255,255,0.22),transparent_55%),radial-gradient(900px_550px_at_20%_10%,rgba(59,130,246,0.18),transparent_60%),radial-gradient(900px_600px_at_80%_20%,rgba(34,197,94,0.14),transparent_60%),linear-gradient(180deg,#2563eb_0%,#1e3a8a_55%,#0b1026_100%)]">
-        <div className="mx-auto flex max-w-md flex-col px-4 pb-28 pt-4">
-          {/* header */}
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-[11px] font-semibold tracking-widest text-white/80">BLOCK PUZZLE</div>
-              <div className="mt-1 text-3xl font-extrabold leading-tight">Drop blocks.</div>
-              <div className="text-3xl font-extrabold leading-tight">Clear lines.</div>
-            </div>
-
-            <Link
-              href="/games"
-              className="rounded-2xl border border-white/15 bg-white/10 px-4 py-2 text-sm font-semibold text-white/95"
-            >
-              Back
-            </Link>
-          </div>
-
-          {/* HUD – Compact Blitz Style */}
-<div className="mt-4 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 backdrop-blur">
-
-  <div className="flex items-center justify-between">
-
-    {/* LEFT – Level */}
-    <div className="flex flex-col">
-      <span className="text-[10px] text-white/60 tracking-widest">LEVEL</span>
-      <span className="text-xl font-extrabold leading-none">{level}</span>
-    </div>
-
-    {/* CENTER – Score */}
-    <div className="text-center">
-      <div className="text-[10px] text-white/60 tracking-widest">SCORE</div>
-      <div className="text-2xl font-extrabold leading-none">{score}</div>
-    </div>
-
-    {/* RIGHT – Combo */}
-    <div className="flex flex-col items-end">
-      <span className="text-[10px] text-white/60 tracking-widest">COMBO</span>
-      <span className="text-xl font-extrabold leading-none">
-        {combo > 0 ? `x${combo}` : "—"}
-      </span>
-    </div>
-
-  </div>
-
-  {/* Progress percentage instead of bar */}
-  <div className="mt-2 text-center text-[11px] text-white/70">
-    Progress to next level: {levelPercent}%
-  </div>
-
-</div>
-
-          {/* board */}
-          <div className="mt-4 rounded-[28px] border border-white/10 bg-black/20 p-4 shadow-[0_40px_140px_-95px_rgba(0,0,0,0.95)] backdrop-blur">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-semibold text-white/80">8×8 Board</div>
-              <button
-                type="button"
-                onClick={restart}
-                className="rounded-2xl border border-white/15 bg-white/10 px-3 py-2 text-xs font-extrabold text-white/95"
-              >
-                Restart
-              </button>
-            </div>
-
-            <div
-              ref={boardRef}
-              className="relative mt-3 aspect-square w-full overflow-hidden rounded-[20px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(0,0,0,0.40))]"
-              style={{ touchAction: "none" }}
-            >
-              {/* grid */}
-              <div className="absolute inset-0 grid" style={{ gridTemplateColumns: `repeat(${GRID}, minmax(0, 1fr))` }}>
-                {displayBoard.map((row, y) =>
-  row.map((v, x) => {
-    const isOverlap = overlaps ? overlaps.has(`${x},${y}`) : false;
-    const isClearHint = clearHint ? clearHint.cells.has(`${x},${y}`) : false;
-
+  if (!mode) {
     return (
-      <div
-        key={`${x}-${y}`}
-        className="relative border border-white/[0.06]"
-        style={{ background: v ? undefined : "rgba(0,0,0,0.10)" }}
-      >
-        {v ? <div className="absolute inset-[2px]" style={{ ...tileStyle(v), borderRadius: 7 }} /> : null}
-
-        {/* 🔥 collision glow on occupied cells */}
-        {isOverlap ? (
-          <div
-            className="pointer-events-none absolute inset-[2px]"
-            style={{
-              borderRadius: 7,
-              background:
-                "radial-gradient(circle at 35% 35%, rgba(255,200,120,0.95), rgba(255,120,40,0.55) 45%, rgba(255,120,40,0.10) 70%, transparent 78%)",
-              boxShadow:
-                "0 0 0 2px rgba(255,140,60,0.55) inset, 0 0 18px rgba(255,140,60,0.35)",
-              mixBlendMode: "screen",
-              animation: "bp-warn 180ms ease-out",
-            }}
-          />
-        ) : null}
-        {/* ✅ line-clear preview pulse (when valid drop would clear lines) */}
-{isClearHint ? (
-  <div
-    className="pointer-events-none absolute inset-[2px]"
-    style={{
-      borderRadius: 7,
-      background:
-        "radial-gradient(circle at 50% 45%, rgba(255,90,90,0.90), rgba(255,40,40,0.35) 55%, rgba(255,40,40,0.08) 75%, transparent 82%)",
-      boxShadow: "0 0 0 2px rgba(255,80,80,0.35) inset, 0 0 20px rgba(255,60,60,0.30)",
-      mixBlendMode: "screen",
-      animation: "bp-clear 190ms ease-out",
-    }}
-  />
-) : null}
-      </div>
-    );
-  })
-)}
+  <main className="min-h-[100dvh] overflow-hidden text-white">
+        <div className="h-full bg-[radial-gradient(1200px_700px_at_50%_-120px,rgba(255,255,255,0.22),transparent_55%),radial-gradient(900px_550px_at_20%_10%,rgba(59,130,246,0.18),transparent_60%),radial-gradient(900px_600px_at_80%_20%,rgba(34,197,94,0.14),transparent_60%),linear-gradient(180deg,#2563eb_0%,#1e3a8a_55%,#0b1026_100%)]">
+          <div className="mx-auto flex h-full w-full max-w-[520px] flex-col px-4 pt-4 pb-[calc(env(safe-area-inset-bottom)+16px)]">
+            {/* header */}
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-[11px] font-semibold tracking-widest text-white/80">BLOCK PUZZLE</div>
+                <div className="mt-1 text-3xl font-extrabold leading-tight">Choose mode.</div>
+                <div className="text-base font-semibold leading-tight text-white/70">Then the game starts instantly.</div>
               </div>
 
-              {/* ✅ line-clear preview overlay (whole row/col glow) */}
-{clearHint ? (
-  <div className="pointer-events-none absolute inset-0">
-    {/* rows */}
-    {clearHint.rows.map((y) => (
-      <div
-        key={`r-${y}`}
-        className="absolute left-0 right-0"
-        style={{
-          top: `${(y / GRID) * 100}%`,
-          height: `${(1 / GRID) * 100}%`,
-          background:
-            "linear-gradient(90deg, transparent, rgba(255,80,80,0.18), rgba(255,130,130,0.35), rgba(255,80,80,0.18), transparent)",
-          boxShadow: "0 0 22px rgba(255,70,70,0.25)",
-          animation: "bp-lineGlow 220ms ease-out",
-        }}
-      />
-    ))}
+              <Link
+                href="/games"
+                className="rounded-2xl border border-white/15 bg-white/10 px-4 py-2 text-sm font-semibold text-white/95"
+              >
+                Back
+              </Link>
+            </div>
 
-    {/* cols */}
-    {clearHint.cols.map((x) => (
-      <div
-        key={`c-${x}`}
-        className="absolute top-0 bottom-0"
-        style={{
-          left: `${(x / GRID) * 100}%`,
-          width: `${(1 / GRID) * 100}%`,
-          background:
-            "linear-gradient(180deg, transparent, rgba(255,80,80,0.18), rgba(255,130,130,0.35), rgba(255,80,80,0.18), transparent)",
-          boxShadow: "0 0 22px rgba(255,70,70,0.25)",
-          animation: "bp-lineGlow 220ms ease-out",
-        }}
-      />
-    ))}
-  </div>
-) : null}
-
-              {/* subtle shine */}
-              <div
-                className="pointer-events-none absolute inset-0"
-                style={{
-                  background: "radial-gradient(900px_520px_at_20%_0%,rgba(255,255,255,0.10),transparent_60%)",
-                }}
-              />
-
-              {/* ✅ magnet catch: bounce + soft shine */}
-{drag.active && magnetFx ? (
-  <div
-    key={magnetFx.id}
-    className="pointer-events-none absolute"
-    style={{
-      left: `${(magnetFx.x / GRID) * 100}%`,
-      top: `${(magnetFx.y / GRID) * 100}%`,
-      width: `${(magnetFx.w / GRID) * 100}%`,
-      height: `${(magnetFx.h / GRID) * 100}%`,
-      animation: "bp-drop 140ms ease-out",
-    }}
-  >
-    <div
-      className="absolute inset-0"
-      style={{
-        borderRadius: 14,
-        background:
-          "radial-gradient(circle at 35% 35%, rgba(255,255,255,0.22), transparent 60%)",
-      }}
-    />
-    <div
-      className="absolute inset-0"
-      style={{
-        borderRadius: 14,
-        background:
-          "linear-gradient(90deg, transparent, rgba(255,255,255,0.22), transparent)",
-        animation: "bp-shine 180ms ease-out",
-      }}
-    />
-  </div>
-) : null}
-
-              {/* line clear fx */}
-              {fxCells.length > 0 ? (
-                <div key={fxId} className="pointer-events-none absolute inset-0">
-                  <div className="absolute inset-0" style={{ animation: "bp-shine 420ms ease-out" }}>
-                    <div className="absolute inset-0 bg-[linear-gradient(90deg,transparent,rgba(255,255,255,0.28),transparent)] opacity-40" />
+            {/* cards */}
+            <div className="mt-5 flex flex-col gap-4">
+              {/* CASH */}
+              <Link
+                href="/games/block-puzzle?mode=cash&entry=0.30&prize=1.70"
+                className="block rounded-[28px] border border-white/10 bg-white/5 p-4 backdrop-blur shadow-[0_40px_140px_-95px_rgba(0,0,0,0.95)]"
+              >
+                <div className="flex items-stretch gap-4">
+                  <div className="w-[42%] rounded-2xl bg-[linear-gradient(135deg,rgba(34,197,94,0.45),rgba(59,130,246,0.35))] p-4">
+                    <div className="text-[10px] font-semibold tracking-widest text-white/80">LIMITED</div>
+                    <div className="mt-2 text-5xl font-extrabold leading-none">${prize || "1.70"}</div>
                   </div>
-                  <div
-                    className="absolute inset-0 grid"
-                    style={{ gridTemplateColumns: `repeat(${GRID}, minmax(0, 1fr))` }}
-                  >
-                    {Array.from({ length: GRID * GRID }).map((_, idx) => {
-                      const x = idx % GRID;
-                      const y = Math.floor(idx / GRID);
-                      const hit = fxCells.some((c) => c.x === x && c.y === y);
-                      return (
-                        <div key={idx} className="relative">
-                          {hit ? (
-                            <div
-                              className="absolute inset-[3px]"
-                              style={{
-                                borderRadius: 7,
-                                background:
-                                  "radial-gradient(circle at 35% 35%, rgba(255,255,255,0.85), rgba(255,255,255,0.10) 55%, transparent 70%)",
-                                animation: "bp-pop 420ms ease-out",
-                              }}
-                            />
-                          ) : null}
-                        </div>
-                      );
-                    })}
+
+                  <div className="flex-1">
+                    <div className="text-2xl font-extrabold leading-tight">Starter Brawl</div>
+                    <div className="mt-1 text-sm text-white/70">Limited time only! • 5 players</div>
+
+                    <div className="mt-4 text-[11px] font-semibold tracking-widest text-white/60">ENTRY</div>
+                    <div className="mt-1 text-lg font-extrabold">${entry || "0.30"}</div>
+
+                    <div className="mt-2 text-sm text-white/70">
+                      Cash mode → auto-match → starts instantly.
+                    </div>
+                  </div>
+
+                  <div className="flex items-center">
+                    <div className="rounded-2xl bg-emerald-400 px-6 py-3 text-sm font-extrabold text-black">
+                      Play
+                    </div>
                   </div>
                 </div>
-              ) : null}
+              </Link>
 
-              {/* game over */}
-              {gameOver ? (
-                <div className="absolute inset-0 grid place-items-center bg-black/55 backdrop-blur-sm">
-                  <div className="w-[86%] max-w-[360px] rounded-[24px] border border-white/10 bg-black/60 p-6 text-center shadow-[0_40px_140px_-90px_rgba(0,0,0,0.95)]">
-                    <div className="text-xs font-semibold tracking-widest text-white/70">GAME OVER</div>
-                    <div className="mt-2 text-4xl font-extrabold">{score}</div>
-                    <div className="mt-1 text-sm text-white/70">No more moves.</div>
-                    <button
-                      type="button"
-                      onClick={restart}
-                      className="mt-5 w-full rounded-2xl bg-white px-5 py-3 text-sm font-extrabold text-black"
-                    >
-                      Play again
-                    </button>
+              {/* GEMS */}
+              <Link
+                href="/games/block-puzzle?mode=gems&entry=50&prize=120"
+                className="block rounded-[28px] border border-white/10 bg-white/5 p-4 backdrop-blur shadow-[0_40px_140px_-95px_rgba(0,0,0,0.95)]"
+              >
+                <div className="flex items-stretch gap-4">
+                  <div className="w-[42%] rounded-2xl bg-[linear-gradient(135deg,rgba(59,130,246,0.40),rgba(168,85,247,0.30))] p-4">
+                    <div className="text-[10px] font-semibold tracking-widest text-white/80">PRIZE</div>
+                    <div className="mt-2 text-5xl font-extrabold leading-none">💎 {prize || "120"}</div>
+                  </div>
+
+                  <div className="flex-1">
+                    <div className="text-2xl font-extrabold leading-tight">Warm up</div>
+                    <div className="mt-1 text-sm text-white/70">Practice-style</div>
+
+                    <div className="mt-4 text-[11px] font-semibold tracking-widest text-white/60">ENTRY</div>
+                    <div className="mt-1 text-lg font-extrabold">💎 {entry || "50"}</div>
+
+                    <div className="mt-2 text-sm text-white/70">
+                      Gems mode → instant practice run.
+                    </div>
+                  </div>
+
+                  <div className="flex items-center">
+                    <div className="rounded-2xl bg-emerald-400 px-6 py-3 text-sm font-extrabold text-black">
+                      Play
+                    </div>
                   </div>
                 </div>
-              ) : null}
+              </Link>
+
+              {/* BIG GEMS */}
+              <Link
+                href="/games/block-puzzle?mode=gems&entry=1000&prize=2000"
+                className="block rounded-[28px] border border-white/10 bg-white/5 p-4 backdrop-blur shadow-[0_40px_140px_-95px_rgba(0,0,0,0.95)]"
+              >
+                <div className="flex items-stretch gap-4">
+                  <div className="w-[42%] rounded-2xl bg-[linear-gradient(135deg,rgba(34,197,94,0.28),rgba(6,182,212,0.26))] p-4">
+                    <div className="text-[10px] font-semibold tracking-widest text-white/80">PRIZE</div>
+                    <div className="mt-2 text-5xl font-extrabold leading-none">💎 2000</div>
+                  </div>
+
+                  <div className="flex-1">
+                    <div className="text-2xl font-extrabold leading-tight">Cash Factory</div>
+                    <div className="mt-1 text-sm text-white/70">Practice-style</div>
+
+                    <div className="mt-4 text-[11px] font-semibold tracking-widest text-white/60">ENTRY</div>
+                    <div className="mt-1 text-lg font-extrabold">💎 1000</div>
+
+                    <div className="mt-2 text-sm text-white/70">
+                      Gems mode → instant practice run.
+                    </div>
+                  </div>
+
+                  <div className="flex items-center">
+                    <div className="rounded-2xl bg-emerald-400 px-6 py-3 text-sm font-extrabold text-black">
+                      Play
+                    </div>
+                  </div>
+                </div>
+              </Link>
+
+              <div className="pt-2 text-center text-xs text-white/60">
+                Cash modes → auto-match. Gems modes → instant practice. If not enough → /shop.
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+    return (
+  <div className="fixed inset-0 z-[5000] overflow-hidden text-white">
+    <style jsx global>{`
+      @keyframes bp-pop {
+        0% { transform: scale(0.98); opacity: 0.0; }
+        15% { opacity: 1; }
+        100% { transform: scale(1.26); opacity: 0; }
+      }
+
+      @keyframes bp-shine {
+        0% { opacity: 0; transform: translateX(-35%); }
+        30% { opacity: 0.55; }
+        100% { opacity: 0; transform: translateX(35%); }
+      }
+
+      @keyframes bp-drop {
+        0% { transform: scale(0.98); }
+        60% { transform: scale(1.02); }
+        100% { transform: scale(1); }
+      }
+
+      @keyframes bp-shake {
+        0% { transform: translateX(0); }
+        25% { transform: translateX(-4px); }
+        50% { transform: translateX(4px); }
+        75% { transform: translateX(-3px); }
+        100% { transform: translateX(0); }
+      }
+
+      @keyframes bp-warn {
+        0% { transform: scale(1); filter: brightness(1); opacity: 0.85; }
+        45% { transform: scale(1.06); filter: brightness(1.25); opacity: 1; }
+        100% { transform: scale(1); filter: brightness(1.05); opacity: 0.9; }
+      }
+
+      @keyframes bp-clear {
+        0% { opacity: 0.55; filter: brightness(1); transform: scale(1); }
+        45% { opacity: 0.95; filter: brightness(1.35); transform: scale(1.03); }
+        100% { opacity: 0.7; filter: brightness(1.1); transform: scale(1); }
+      }
+
+            @keyframes bp-lineGlow {
+        0% { opacity: 0.0; filter: blur(2px); transform: scaleX(0.92); }
+        35% { opacity: 0.55; filter: blur(1px); transform: scaleX(1); }
+        100% { opacity: 0.15; filter: blur(2px); transform: scaleX(1); }
+      }
+
+            @keyframes bp-prismCell {
+        0% { transform: scale(0.72); opacity: 0.0; filter: blur(1px) saturate(1.35); }
+        22% { transform: scale(1.12); opacity: 1; filter: blur(0px) saturate(1.8); }
+        100% { transform: scale(1.35); opacity: 0; filter: blur(1.5px) saturate(1.2); }
+      }
+
+      @keyframes bp-prismSpark {
+        0% { transform: scale(0.9) rotate(0deg); opacity: 0.0; }
+        25% { opacity: 0.85; }
+        100% { transform: scale(1.35) rotate(38deg); opacity: 0; }
+      }
+
+      @keyframes bp-prismSweep {
+        0% { opacity: 0; transform: translateX(-22%); filter: blur(1px) saturate(1.6); }
+        18% { opacity: 0.85; }
+        100% { opacity: 0; transform: translateX(22%); filter: blur(1.5px) saturate(1.25); }
+      }
+              @keyframes bp-charge {
+        0%   { opacity: 0; transform: scale(0.985); filter: blur(2px) saturate(1.6); }
+        35%  { opacity: 0.95; transform: scale(1.01); filter: blur(0.6px) saturate(2.0); }
+        100% { opacity: 0; transform: scale(1.03); filter: blur(2px) saturate(1.2); }
+      }
+
+      @keyframes bp-chargeSweep {
+        0%   { opacity: 0; transform: translateX(-30%); }
+        20%  { opacity: 0.85; }
+        100% { opacity: 0; transform: translateX(30%); }
+      }
+              @keyframes bp-shakeSoft {
+        0%   { transform: translate3d(0,0,0); }
+        20%  { transform: translate3d(-1px, 0, 0) rotate(-0.12deg); }
+        45%  { transform: translate3d(1px, 0, 0) rotate(0.12deg); }
+        70%  { transform: translate3d(-0.6px, 0.4px, 0) rotate(-0.08deg); }
+        100% { transform: translate3d(0,0,0); }
+      }
+
+      @keyframes bp-bloom {
+        0%   { opacity: 0; transform: scale(0.985); filter: blur(10px) saturate(1.8); }
+        25%  { opacity: 0.85; transform: scale(1.01); filter: blur(14px) saturate(2.2); }
+        100% { opacity: 0; transform: scale(1.03); filter: blur(18px) saturate(1.4); }
+      }
+    `}</style>
+
+    <div className="absolute inset-0 bg-[radial-gradient(1200px_700px_at_50%_-120px,rgba(255,255,255,0.22),transparent_55%),radial-gradient(900px_550px_at_20%_10%,rgba(59,130,246,0.18),transparent_60%),radial-gradient(900px_600px_at_80%_20%,rgba(34,197,94,0.14),transparent_60%),linear-gradient(180deg,#2563eb_0%,#1e3a8a_55%,#0b1026_100%)]" />
+
+    {/* FULLSCREEN GAME ONLY: board + pieces */}
+            <div
+      key={`impact-${impactId}`}
+      className="relative mx-auto flex h-[100dvh] w-full max-w-[520px] flex-col px-4 pt-[calc(env(safe-area-inset-top)+10px)] pb-[calc(env(safe-area-inset-bottom)+10px)]"
+      style={impactOn ? { animation: "bp-shakeSoft 180ms ease-out" } : undefined}
+    >
+            {impactOn ? (
+        <div className="pointer-events-none absolute inset-0 z-[2]">
+          <div
+            className="absolute inset-[-10%]"
+            style={{
+              background:
+                "radial-gradient(600px_360px_at_50%_25%, rgba(255,255,255,0.18), transparent 60%), radial-gradient(520px_320px_at_30%_40%, rgba(120,190,255,0.22), transparent 62%), radial-gradient(520px_320px_at_70%_45%, rgba(255,120,220,0.18), transparent 62%)",
+              mixBlendMode: "screen",
+              animation: "bp-bloom 180ms ease-out",
+            }}
+          />
+        </div>
+      ) : null}
+            {/* compact in-game HUD */}
+      <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 backdrop-blur">
+        <div className="flex items-center justify-between gap-3">
+          {/* LEFT: level + combo (combo moved next to level) */}
+          <div className="flex items-end gap-4">
+            <div className="flex flex-col">
+              <span className="text-[10px] text-white/60 tracking-widest">LEVEL</span>
+              <span className="text-xl font-extrabold leading-none">{level}</span>
+            </div>
+
+            <div className="flex flex-col">
+              <span className="text-[10px] text-white/60 tracking-widest">COMBO</span>
+              <span className="text-xl font-extrabold leading-none">
+                {combo > 0 ? `x${combo}` : "—"}
+              </span>
             </div>
           </div>
 
-          {/* pieces tray — fixed 3 slots, centered, neat */}
-          <div className="mt-4 rounded-[24px] border border-white/10 bg-white/5 px-3 py-3 shadow-[0_40px_140px_-95px_rgba(0,0,0,0.9)] backdrop-blur">
-            <div className="flex items-center justify-between">
-              <div className="text-xs font-semibold text-white/80">Pieces</div>
-              <div className="text-[11px] text-white/60">Drag & drop</div>
+          {/* CENTER: score */}
+          <div className="text-center">
+            <div className="text-[10px] text-white/60 tracking-widest">SCORE</div>
+            <div className="text-2xl font-extrabold leading-none">{score}</div>
+          </div>
+
+          {/* RIGHT: back */}
+          <button
+            type="button"
+            onClick={() => router.push("/games/block-puzzle")}
+            className="shrink-0 rounded-2xl border border-white/15 bg-white/10 px-4 py-2 text-sm font-extrabold text-white/95 hover:bg-white/15"
+          >
+            Back
+          </button>
+        </div>
+
+        <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-white/70">
+          <span>Progress to next level:</span>
+          <span className="font-semibold">{levelPercent}%</span>
+          <span className="rounded-2xl border border-white/10 bg-black/15 px-2 py-1 text-[11px] text-white/80">
+            BEST: <span className="font-extrabold text-white">{best}</span>
+          </span>
+        </div>
+      </div>
+
+            {/* board card (no stretching -> removes empty vertical space) */}
+            <div className="mt-1 rounded-[28px] border border-white/10 bg-black/20 p-3 shadow-[0_40px_140px_-95px_rgba(0,0,0,0.95)] backdrop-blur">
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-semibold text-white/80">8×8 Board</div>
+        </div>
+
+        <div className="mt-3">
+          <div
+            ref={boardRef}
+            className="relative aspect-square w-full overflow-hidden rounded-[20px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.06),rgba(0,0,0,0.40))]"
+            style={{ touchAction: "none" }}
+          >
+            {/* grid */}
+            <div className="absolute inset-0 grid" style={{ gridTemplateColumns: `repeat(${GRID}, minmax(0, 1fr))` }}>
+              {displayBoard.map((row, y) =>
+                row.map((v, x) => {
+                  const isOverlap = overlaps ? overlaps.has(`${x},${y}`) : false;
+                  const isClearHint = clearHint ? clearHint.cells.has(`${x},${y}`) : false;
+
+                  return (
+                    <div
+                      key={`${x}-${y}`}
+                      className="relative border border-white/[0.06]"
+                      style={{ background: v ? undefined : "rgba(0,0,0,0.10)" }}
+                    >
+                      {v ? <div className="absolute inset-[2px]" style={{ ...tileStyle(v), borderRadius: 7 }} /> : null}
+
+                      {isOverlap ? (
+                        <div
+                          className="pointer-events-none absolute inset-[2px]"
+                          style={{
+                            borderRadius: 7,
+                            background:
+                              "radial-gradient(circle at 35% 35%, rgba(255,200,120,0.95), rgba(255,120,40,0.55) 45%, rgba(255,120,40,0.10) 70%, transparent 78%)",
+                            boxShadow:
+                              "0 0 0 2px rgba(255,140,60,0.55) inset, 0 0 18px rgba(255,140,60,0.35)",
+                            mixBlendMode: "screen",
+                            animation: "bp-warn 180ms ease-out",
+                          }}
+                        />
+                      ) : null}
+
+                      {isClearHint ? (
+                        <div
+                          className="pointer-events-none absolute inset-[2px]"
+                          style={{
+                            borderRadius: 7,
+                            background:
+                              "radial-gradient(circle at 50% 45%, rgba(255,90,90,0.90), rgba(255,40,40,0.35) 55%, rgba(255,40,40,0.08) 75%, transparent 82%)",
+                            boxShadow: "0 0 0 2px rgba(255,80,80,0.35) inset, 0 0 20px rgba(255,60,60,0.30)",
+                            mixBlendMode: "screen",
+                            animation: "bp-clear 190ms ease-out",
+                          }}
+                        />
+                      ) : null}
+                    </div>
+                  );
+                })
+              )}
             </div>
 
-            <div className="mt-3 grid grid-cols-3 gap-3">
-              {pieces.map((p) => {
-                const { w, h } = pieceBounds(p.blocks);
-                const maxW = 4; // keep slot sizing stable
-                const maxH = 4;
+                       {clearHint ? (
+              <div className="pointer-events-none absolute inset-0">
+                {clearHint.rows.map((y) => (
+                  <div
+                    key={`r-${y}`}
+                    className="absolute left-0 right-0"
+                    style={{
+                      top: `${(y / GRID) * 100}%`,
+                      height: `${(1 / GRID) * 100}%`,
+                      background:
+                        "linear-gradient(90deg, transparent, rgba(255,80,80,0.18), rgba(255,130,130,0.35), rgba(255,80,80,0.18), transparent)",
+                      boxShadow: "0 0 22px rgba(255,70,70,0.25)",
+                      animation: "bp-lineGlow 220ms ease-out",
+                    }}
+                  />
+                ))}
 
-                const slotW = maxW * trayCell;
-const slotH = maxH * trayCell;
+                {clearHint.cols.map((x) => (
+                  <div
+                    key={`c-${x}`}
+                    className="absolute top-0 bottom-0"
+                    style={{
+                      left: `${(x / GRID) * 100}%`,
+                      width: `${(1 / GRID) * 100}%`,
+                      background:
+                        "linear-gradient(180deg, transparent, rgba(255,80,80,0.18), rgba(255,130,130,0.35), rgba(255,80,80,0.18), transparent)",
+                      boxShadow: "0 0 22px rgba(255,70,70,0.25)",
+                      animation: "bp-lineGlow 220ms ease-out",
+                    }}
+                  />
+                ))}
+              </div>
+            ) : null}
 
-// ✅ auto compact padding based on size
-const pad = clamp(Math.round(trayCell * 0.28), 4, 8);
+            <div
+              className="pointer-events-none absolute inset-0"
+              style={{
+                background: "radial-gradient(900px_520px_at_20%_0%,rgba(255,255,255,0.10),transparent_60%)",
+              }}
+            />
 
-                const offsetX = Math.floor((slotW - w * trayCell) / 2);
-                const offsetY = Math.floor((slotH - h * trayCell) / 2);
+            {drag.active && magnetFx ? (
+              <div
+                key={magnetFx.id}
+                className="pointer-events-none absolute"
+                style={{
+                  left: `${(magnetFx.x / GRID) * 100}%`,
+                  top: `${(magnetFx.y / GRID) * 100}%`,
+                  width: `${(magnetFx.w / GRID) * 100}%`,
+                  height: `${(magnetFx.h / GRID) * 100}%`,
+                  animation: "bp-drop 140ms ease-out",
+                }}
+              >
+                <div
+                  className="absolute inset-0"
+                  style={{
+                    borderRadius: 14,
+                    background: "radial-gradient(circle at 35% 35%, rgba(255,255,255,0.22), transparent 60%)",
+                  }}
+                />
+                <div
+                  className="absolute inset-0"
+                  style={{
+                    borderRadius: 14,
+                    background: "linear-gradient(90deg, transparent, rgba(255,255,255,0.22), transparent)",
+                    animation: "bp-shine 180ms ease-out",
+                  }}
+                />
+              </div>
+            ) : null}
 
-                const isActive = drag.active && drag.pieceId === p.id;
+                        {/* ✅ premium clear FX: prismatic beams + per-cell prisms */}
+                        {fxLines ? (
+              <div key={`lines-${fxLines.id}`} className="pointer-events-none absolute inset-0">
+                {/* ✅ CHARGE (quick outline + sweep) */}
+                {fxLines.rows.map((y) => (
+                  <div
+                    key={`ch-r-${y}`}
+                    className="absolute left-0 right-0"
+                    style={{
+                      top: `${(y / GRID) * 100}%`,
+                      height: `${(1 / GRID) * 100}%`,
+                      borderRadius: 10,
+                      boxShadow:
+                        "0 0 0 2px rgba(255,255,255,0.10) inset, 0 0 18px rgba(120,190,255,0.18), 0 0 14px rgba(255,120,220,0.12)",
+                      background:
+                        "linear-gradient(90deg, rgba(255,80,220,0.06), rgba(80,200,255,0.08), rgba(255,220,80,0.06))",
+                      animation: "bp-charge 170ms ease-out",
+                      mixBlendMode: "screen",
+                    }}
+                  >
+                    <div
+                      className="absolute inset-0"
+                      style={{
+                        borderRadius: 10,
+                        background:
+                          "linear-gradient(90deg, transparent, rgba(255,255,255,0.40), transparent)",
+                        animation: "bp-chargeSweep 170ms ease-out",
+                        mixBlendMode: "screen",
+                      }}
+                    />
+                  </div>
+                ))}
+
+                {fxLines.cols.map((x) => (
+                  <div
+                    key={`ch-c-${x}`}
+                    className="absolute top-0 bottom-0"
+                    style={{
+                      left: `${(x / GRID) * 100}%`,
+                      width: `${(1 / GRID) * 100}%`,
+                      borderRadius: 10,
+                      boxShadow:
+                        "0 0 0 2px rgba(255,255,255,0.10) inset, 0 0 18px rgba(120,190,255,0.16), 0 0 14px rgba(255,120,220,0.10)",
+                      background:
+                        "linear-gradient(180deg, rgba(255,80,220,0.06), rgba(80,200,255,0.08), rgba(255,220,80,0.06))",
+                      animation: "bp-charge 170ms ease-out",
+                      mixBlendMode: "screen",
+                    }}
+                  >
+                    <div
+                      className="absolute inset-0"
+                      style={{
+                        borderRadius: 10,
+                        background:
+                          "linear-gradient(90deg, transparent, rgba(255,255,255,0.38), transparent)",
+                        animation: "bp-chargeSweep 170ms ease-out",
+                        mixBlendMode: "screen",
+                      }}
+                    />
+                  </div>
+                ))}
+
+                {/* ✅ PRISM BEAMS */}
+                {fxLines.rows.map((y) => (
+                  <div
+                    key={`pr-r-${y}`}
+                    className="absolute left-0 right-0"
+                    style={{
+                      top: `${(y / GRID) * 100}%`,
+                      height: `${(1 / GRID) * 100}%`,
+                      background:
+                        "linear-gradient(90deg, transparent, rgba(255,80,220,0.20), rgba(80,200,255,0.28), rgba(255,220,80,0.22), transparent)",
+                      boxShadow: "0 0 26px rgba(120,190,255,0.18), 0 0 22px rgba(255,120,220,0.12)",
+                      animation: "bp-prismSweep 260ms ease-out",
+                      mixBlendMode: "screen",
+                    }}
+                  />
+                ))}
+
+                {fxLines.cols.map((x) => (
+                  <div
+                    key={`pr-c-${x}`}
+                    className="absolute top-0 bottom-0"
+                    style={{
+                      left: `${(x / GRID) * 100}%`,
+                      width: `${(1 / GRID) * 100}%`,
+                      background:
+                        "linear-gradient(180deg, transparent, rgba(255,80,220,0.18), rgba(80,200,255,0.26), rgba(255,220,80,0.20), transparent)",
+                      boxShadow: "0 0 26px rgba(120,190,255,0.16), 0 0 22px rgba(255,120,220,0.10)",
+                      animation: "bp-prismSweep 260ms ease-out",
+                      mixBlendMode: "screen",
+                    }}
+                  />
+                ))}
+              </div>
+            ) : null}
+
+            {fxCells.length > 0 ? (
+              <div key={`cells-${fxId}`} className="pointer-events-none absolute inset-0">
+                <div className="absolute inset-0 grid" style={{ gridTemplateColumns: `repeat(${GRID}, minmax(0, 1fr))` }}>
+                  {Array.from({ length: GRID * GRID }).map((_, idx) => {
+                    const x = idx % GRID;
+                    const y = Math.floor(idx / GRID);
+                    const hit = fxCells.some((c) => c.x === x && c.y === y);
+                    if (!hit) return <div key={idx} className="relative" />;
+
+                    return (
+                      <div key={idx} className="relative">
+                        {/* prism burst */}
+                        <div
+                          className="absolute inset-[3px]"
+                          style={{
+                            borderRadius: 9,
+                            background:
+                              "conic-gradient(from 40deg, rgba(255,80,220,0.0), rgba(255,80,220,0.55), rgba(80,200,255,0.55), rgba(255,220,80,0.52), rgba(180,255,120,0.40), rgba(255,80,220,0.0))",
+                            boxShadow:
+                              "0 0 18px rgba(120,190,255,0.18), 0 0 14px rgba(255,120,220,0.12)",
+                            animation: "bp-prismCell 360ms ease-out",
+                            mixBlendMode: "screen",
+                          }}
+                        />
+                        {/* spark cross */}
+                        <div
+                          className="absolute inset-[6px]"
+                          style={{
+                            borderRadius: 9,
+                            background:
+                              "linear-gradient(90deg, transparent, rgba(255,255,255,0.55), transparent), linear-gradient(180deg, transparent, rgba(255,255,255,0.40), transparent)",
+                            animation: "bp-prismSpark 320ms ease-out",
+                            mixBlendMode: "screen",
+                            opacity: 0.9,
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+
+            {gameOver ? (
+              <div className="absolute inset-0 grid place-items-center bg-black/55 backdrop-blur-sm">
+                <div className="w-[86%] max-w-[360px] rounded-[24px] border border-white/10 bg-black/60 p-6 text-center shadow-[0_40px_140px_-90px_rgba(0,0,0,0.95)]">
+                  <div className="text-xs font-semibold tracking-widest text-white/70">GAME OVER</div>
+                  <div className="mt-2 text-4xl font-extrabold">{score}</div>
+                  <div className="mt-1 text-sm text-white/70">No more moves.</div>
+                                    <button
+                    type="button"
+                    onClick={() => router.push("/games/block-puzzle")}
+                    className="mt-5 w-full rounded-2xl bg-white px-5 py-3 text-sm font-extrabold text-black"
+                  >
+                    Back to Games
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+            {/* pieces tray pinned visually at the bottom */}
+            <div className="mt-1 rounded-[24px] border border-white/10 bg-white/5 px-3 py-3 shadow-[0_40px_140px_-95px_rgba(0,0,0,0.9)] backdrop-blur">
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-semibold text-white/80">Pieces</div>
+          <div className="text-[11px] text-white/60">Drag & drop</div>
+        </div>
+
+        <div className="mt-3 grid grid-cols-3 gap-3">
+          {pieces.map((p) => {
+            const { w, h } = pieceBounds(p.blocks);
+            const maxW = 4;
+            const maxH = 4;
+
+            const slotW = maxW * trayCell;
+            const slotH = maxH * trayCell;
+
+            const pad = clamp(Math.round(trayCell * 0.28), 4, 8);
+
+            const offsetX = Math.floor((slotW - w * trayCell) / 2);
+            const offsetY = Math.floor((slotH - h * trayCell) / 2);
+
+            const isActive = drag.active && drag.pieceId === p.id;
+
+            return (
+              <div key={p.id} className="flex flex-col items-center">
+                <div
+                  onPointerDown={(e) => {
+  e.preventDefault();
+  try {
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  } catch {}
+  beginDrag(p.id, e);
+}}
+                  className={
+                    "relative select-none overflow-hidden rounded-2xl border border-white/10 bg-black/15 " +
+                    (isActive ? "ring-2 ring-white/40" : "")
+                  }
+                  style={{
+                    touchAction: "none",
+                    height: slotH + pad * 2,
+                    width: slotW + pad * 2,
+                    boxShadow: "0 18px 60px -55px rgba(0,0,0,0.95)",
+                  }}
+                >
+                  <div
+                    className="pointer-events-none absolute inset-0"
+                    style={{
+                      background:
+                        "radial-gradient(220px_140px_at_50%_28%, rgba(255,255,255,0.10), transparent 60%), linear-gradient(180deg, rgba(255,255,255,0.06), rgba(0,0,0,0.10))",
+                      boxShadow:
+                        "inset 0 0 0 1px rgba(255,255,255,0.06), inset 0 -18px 30px rgba(0,0,0,0.22)",
+                    }}
+                  />
+
+                  <div className="relative" style={{ height: slotH, width: slotW, margin: pad }}>
+                    {isActive ? null : (
+                      <div
+                        className="absolute"
+                        style={{
+                          left: offsetX,
+                          top: offsetY,
+                          width: w * trayCell,
+                          height: h * trayCell,
+                          filter: "drop-shadow(0 12px 14px rgba(0,0,0,0.38))",
+                        }}
+                      >
+                        {p.blocks.map((b, idx) => (
+                          <div
+                            key={idx}
+                            className="absolute"
+                            style={{
+                              left: b.x * trayCell,
+                              top: b.y * trayCell,
+                              width: trayCell,
+                              height: trayCell,
+                              ...tileStyleTray(p.color),
+                              ...cellRadiusForBlock(p.blocks, b.x, b.y),
+                            }}
+                          />
+                        ))}
+                      </div>
+                    )}
+
+                    <div
+                      className="pointer-events-none absolute"
+                      style={{
+                        left: offsetX,
+                        top: offsetY + h * trayCell - Math.max(6, Math.round(trayCell * 0.22)),
+                        width: w * trayCell,
+                        height: Math.max(8, Math.round(trayCell * 0.28)),
+                        background: "radial-gradient(circle at 50% 50%, rgba(0,0,0,0.28), transparent 68%)",
+                        filter: "blur(2px)",
+                        opacity: 0.75,
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-1 text-center text-[11px] text-white/55">+{p.blocks.length * 10}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ghost piece */}
+      {(() => {
+        const snap = getSnap(drag);
+
+        return drag.active && draggingPiece && ghost ? (
+          <div
+            className="pointer-events-none fixed left-0 top-0 z-[9999]"
+            style={{
+  transform: `translate(${ghost.left}px, ${ghost.top}px)`,
+  opacity: snap && snap.ok ? 0.95 : 0.88,
+}}
+          >
+            <div
+              className="relative"
+              style={{
+                width: pieceBounds(draggingPiece.blocks).w * cellPx,
+                height: pieceBounds(draggingPiece.blocks).h * cellPx,
+                filter:
+                  snap && snap.ok
+                    ? "drop-shadow(0 14px 20px rgba(0,0,0,0.35))"
+                    : "drop-shadow(0 10px 16px rgba(0,0,0,0.25))",
+                animation:
+                  snap && snap.ok
+                    ? "bp-drop 120ms ease-out"
+                    : snap && !snap.ok
+                    ? "bp-shake 160ms ease-out"
+                    : undefined,
+              }}
+            >
+              {draggingPiece.blocks.map((b, idx) => {
+                const absX = snap ? snap.x + b.x : null;
+                const absY = snap ? snap.y + b.y : null;
+
+                const collides =
+                  overlaps && absX !== null && absY !== null ? overlaps.has(`${absX},${absY}`) : false;
 
                 return (
-                  <div key={p.id} className="flex flex-col items-center">
-                    <div
-  onPointerDown={(e) => beginDrag(p.id, e)}
-  className={
-    "relative select-none overflow-hidden rounded-2xl border border-white/10 bg-black/15 " +
-    (isActive ? "ring-2 ring-white/40" : "")
-  }
-  style={{
-    touchAction: "none",
-    height: slotH + pad * 2,
-    width: slotW + pad * 2,
-    boxShadow: "0 18px 60px -55px rgba(0,0,0,0.95)",
-  }}
->
-  {/* ✅ pedestal / showcase */}
-  <div
-    className="pointer-events-none absolute inset-0"
-    style={{
-      background:
-        "radial-gradient(220px_140px_at_50%_28%, rgba(255,255,255,0.10), transparent 60%), linear-gradient(180deg, rgba(255,255,255,0.06), rgba(0,0,0,0.10))",
-      boxShadow:
-        "inset 0 0 0 1px rgba(255,255,255,0.06), inset 0 -18px 30px rgba(0,0,0,0.22)",
-    }}
-  />
-
-  <div className="relative" style={{ height: slotH, width: slotW, margin: pad }}>
-    {/* ✅ single “slab” piece: shadow under the whole piece (like gif) */}
-    <div
-      className="absolute"
-      style={{
-        left: offsetX,
-        top: offsetY,
-        width: w * trayCell,
-        height: h * trayCell,
-        filter: "drop-shadow(0 12px 14px rgba(0,0,0,0.38))",
-      }}
-    >
-      {p.blocks.map((b, idx) => (
-        <div
-          key={idx}
-          className="absolute"
-          style={{
-            left: b.x * trayCell,
-            top: b.y * trayCell,
-            width: trayCell,
-            height: trayCell,
-            ...tileStyleTray(p.color),
-            ...cellRadiusForBlock(p.blocks, b.x, b.y),
-          }}
-        />
-      ))}
-    </div>
-
-    {/* ✅ subtle floor shadow under piece (extra depth) */}
-    <div
-      className="pointer-events-none absolute"
-      style={{
-        left: offsetX,
-        top: offsetY + h * trayCell - Math.max(6, Math.round(trayCell * 0.22)),
-        width: w * trayCell,
-        height: Math.max(8, Math.round(trayCell * 0.28)),
-        background: "radial-gradient(circle at 50% 50%, rgba(0,0,0,0.28), transparent 68%)",
-        filter: "blur(2px)",
-        opacity: 0.75,
-      }}
-    />
-  </div>
-</div>
-
-                    <div className="mt-1 text-center text-[11px] text-white/55">+{p.blocks.length * 10}</div>
-                  </div>
+                  <div
+                    key={idx}
+                    className="absolute"
+                    style={{
+                      left: b.x * cellPx,
+                      top: b.y * cellPx,
+                      width: cellPx,
+                      height: cellPx,
+                      ...(collides
+                        ? {
+                            background:
+                              "linear-gradient(180deg, rgba(255,255,255,0.18), rgba(0,0,0,0.18)), linear-gradient(135deg, #FFB020, rgba(0,0,0,0.22))",
+                            boxShadow:
+                              "inset 0 2px 0 rgba(255,255,255,0.25), inset 0 -2px 0 rgba(0,0,0,0.25), 0 12px 24px rgba(255,140,60,0.30), 0 0 22px rgba(255,140,60,0.35)",
+                            animation: "bp-warn 180ms ease-out",
+                          }
+                        : {
+                            ...tileStyle(draggingPiece.color),
+                          }),
+                      ...cellRadiusForBlock(draggingPiece.blocks, b.x, b.y),
+                      opacity: snap && snap.ok ? 0.98 : 0.88,
+                    }}
+                  />
                 );
               })}
             </div>
           </div>
+        ) : null;
+      })()}
 
-          {/* ghost piece (never disappears). No projection overlays. */}
-{(() => {
-  const snap = getSnap(drag);
-
-  return drag.active && draggingPiece && ghost ? (
-            <div
-  className="pointer-events-none fixed left-0 top-0 z-[9999]"
-  style={{
-    transform: `translate(${ghost.left}px, ${ghost.top}px)`,
-    opacity: ghost.mode === "snapped" ? 0.95 : 0.88,
-  }}
->
-  {/* solid piece wrapper */}
-  <div
-    className="relative"
-    style={{
-      width: pieceBounds(draggingPiece.blocks).w * cellPx,
-      height: pieceBounds(draggingPiece.blocks).h * cellPx,
-      filter:
-        snap && snap.ok
-          ? "drop-shadow(0 14px 20px rgba(0,0,0,0.35))"
-          : "drop-shadow(0 10px 16px rgba(0,0,0,0.25))",
-      animation:
-        snap && snap.ok
-          ? "bp-drop 120ms ease-out"
-          : snap && !snap.ok
-          ? "bp-shake 160ms ease-out"
-          : undefined,
-    }}
-  >
-                {draggingPiece.blocks.map((b, idx) => {
-  const absX = snap ? snap.x + b.x : null;
-  const absY = snap ? snap.y + b.y : null;
-
-  const collides =
-    overlaps && absX !== null && absY !== null ? overlaps.has(`${absX},${absY}`) : false;
-
-  return (
-    <div
-      key={idx}
-      className="absolute"
-      style={{
-        left: b.x * cellPx,
-        top: b.y * cellPx,
-        width: cellPx,
-        height: cellPx,
-
-        ...(collides
-  ? {
-      // 🔥 brighter orange glow on colliding blocks
-      background:
-        "linear-gradient(180deg, rgba(255,255,255,0.18), rgba(0,0,0,0.18)), linear-gradient(135deg, #FFB020, rgba(0,0,0,0.22))",
-      boxShadow:
-        "inset 0 2px 0 rgba(255,255,255,0.25), inset 0 -2px 0 rgba(0,0,0,0.25), 0 12px 24px rgba(255,140,60,0.30), 0 0 22px rgba(255,140,60,0.35)",
-      animation: "bp-warn 180ms ease-out",
-    }
-  : {
-      ...tileStyle(draggingPiece.color),
-    }),
-
-        ...cellRadiusForBlock(draggingPiece.blocks, b.x, b.y),
-        opacity: snap && snap.ok ? 0.98 : 0.88,
-      }}
-    />
-  );
-})}
-              </div>
-            </div>
-          ) : null;
-})()}
-
-          {/* toast */}
-          {toast ? (
-            <div className="fixed left-0 right-0 top-4 z-[9999] flex justify-center">
-              <div className="rounded-2xl border border-white/15 bg-black/60 px-4 py-2 text-sm font-semibold text-white backdrop-blur">
-                {toast}
-              </div>
-            </div>
-          ) : null}
+      {/* toast */}
+      {toast ? (
+        <div className="fixed left-0 right-0 top-4 z-[9999] flex justify-center">
+          <div className="rounded-2xl border border-white/15 bg-black/60 px-4 py-2 text-sm font-semibold text-white backdrop-blur">
+            {toast}
+          </div>
         </div>
-      </div>
-    </main>
-  );
+      ) : null}
+    </div>
+  </div>
+);
 }
 // ===== FILE END: apps/web/app/(public)/games/block-puzzle/page.tsx =====

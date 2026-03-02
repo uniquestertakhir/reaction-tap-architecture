@@ -10,19 +10,29 @@ export default function PublicLayout({ children }: { children: ReactNode }) {
 
   const path = usePathname() || "/";
 
-  const isMenuScreen =
-  path === "/games" ||
-  path.startsWith("/games/") ||
-  path === "/shop" ||
-  path.startsWith("/shop/") ||
-  path === "/results" ||
-  path.startsWith("/results/") ||
-  path === "/rewards" ||
-  path.startsWith("/rewards/") ||
-  path === "/leagues" ||
-  path.startsWith("/leagues/") ||
-  path === "/settings" ||
-  path.startsWith("/settings/");
+      const isMenuScreen =
+    // main tabs
+    path === "/games" ||
+    path.startsWith("/games/") ||
+    path === "/shop" ||
+    path.startsWith("/shop/") ||
+    path === "/results" ||
+    path.startsWith("/results/") ||
+    path === "/rewards" ||
+    path.startsWith("/rewards/") ||
+    path === "/leagues" ||
+    path.startsWith("/leagues/") ||
+    // menu pages (must share same shell/layers)
+    path === "/profile" ||
+    path.startsWith("/profile/") ||
+    path === "/friends" ||
+    path.startsWith("/friends/") ||
+    path === "/settings" ||
+    path.startsWith("/settings/") ||
+    path === "/login" ||
+    path.startsWith("/login/") ||
+    path === "/save-account" ||
+    path.startsWith("/save-account/");
 
   if (isMenuScreen) {
     return (
