@@ -4,62 +4,8 @@
 import Link from "next/link";
 import React from "react";
 import { readPlayer } from "@/lib/playerStore";
+import { listGamesMeta } from "@/lib/games/registry";
 
-type GameTile = {
-  id: string;
-  title: string;
-  subtitle?: string;
-  href: string;
-  locked?: { level: number };
-  // simple “theme” classes for now (we’ll swap to real art later)
-  className: string;
-};
-
-const GAMES: GameTile[] = [
-  {
-    id: "reaction-tap",
-    title: "Reaction Tap",
-    subtitle: "Tap-fast skill game",
-    href: "/games/reaction-tap",
-    className:
-      "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.22),transparent_60%),linear-gradient(135deg,rgba(124,58,237,0.65),rgba(17,24,39,0.35))]",
-  },
-  {
-    id: "block-puzzle",
-    title: "Block Puzzle",
-    subtitle: "Block Blast-style",
-    href: "/games/block-puzzle",
-    className:
-      "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.20),transparent_60%),linear-gradient(135deg,rgba(59,130,246,0.40),rgba(17,24,39,0.35))]",
-  },
-  {
-    id: "bingo",
-    title: "Bingo",
-    subtitle: "Coming soon",
-    href: "/games/bingo",
-    locked: { level: 6 },
-    className:
-      "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.18),transparent_60%),linear-gradient(135deg,rgba(168,85,247,0.55),rgba(17,24,39,0.35))]",
-  },
-  {
-    id: "solitaire",
-    title: "Solitaire",
-    subtitle: "Coming soon",
-    href: "/games/solitaire",
-    locked: { level: 6 },
-    className:
-      "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.16),transparent_60%),linear-gradient(135deg,rgba(34,197,94,0.35),rgba(17,24,39,0.35))]",
-  },
-  {
-    id: "tile-match",
-    title: "Tile Match",
-    subtitle: "Coming soon",
-    href: "/games/tile-match",
-    locked: { level: 6 },
-    className:
-      "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.16),transparent_60%),linear-gradient(135deg,rgba(244,63,94,0.35),rgba(17,24,39,0.35))]",
-  },
-];
 
 function LockPill({ level }: { level: number }) {
   return (
@@ -70,12 +16,27 @@ function LockPill({ level }: { level: number }) {
   );
 }
 
+function gameTileClass(index: number) {
+  const variants = [
+    "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.22),transparent_60%),linear-gradient(135deg,rgba(124,58,237,0.65),rgba(17,24,39,0.35))]",
+    "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.20),transparent_60%),linear-gradient(135deg,rgba(59,130,246,0.40),rgba(17,24,39,0.35))]",
+    "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.18),transparent_60%),linear-gradient(135deg,rgba(168,85,247,0.55),rgba(17,24,39,0.35))]",
+    "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.16),transparent_60%),linear-gradient(135deg,rgba(34,197,94,0.35),rgba(17,24,39,0.35))]",
+    "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.16),transparent_60%),linear-gradient(135deg,rgba(244,63,94,0.35),rgba(17,24,39,0.35))]",
+    "bg-[radial-gradient(800px_500px_at_30%_-10%,rgba(255,255,255,0.18),transparent_60%),linear-gradient(135deg,rgba(99,102,241,0.40),rgba(17,24,39,0.35))]",
+  ];
+
+  return variants[index % variants.length];
+}
+
 export default function GamesPage() {
   const [level, setLevel] = React.useState(0);
 
   React.useEffect(() => {
     setLevel(readPlayer().level);
   }, []);
+
+  const games = listGamesMeta();
 
   return (
     <div className="mt-5">
@@ -93,14 +54,14 @@ export default function GamesPage() {
 
       {/* tiles grid */}
       <div className="mt-5 grid grid-cols-2 gap-4">
-        {GAMES.map((g) => {
-          const isLocked = !!g.locked && level < g.locked.level;
+          {games.map((g, index) => {
+           const isLocked = typeof g.requiresLevel === "number" && level < g.requiresLevel;
 
           const CardInner = (
             <div
-              className={
+                            className={
                 "group relative overflow-hidden rounded-3xl border border-white/10 p-4 shadow-[0_30px_120px_-80px_rgba(0,0,0,0.9)] " +
-                g.className +
+                gameTileClass(index) +
                 (isLocked ? " opacity-90" : "")
               }
             >
@@ -119,14 +80,16 @@ export default function GamesPage() {
     {isLocked ? "Locked" : "Open"}
   </div>
 
-  <div className="mt-3 text-[11px] text-white/55">
-    {g.locked ? `Locked until level ${g.locked.level}.` : "Open → choose a mode inside the game."}
+    <div className="mt-3 text-[11px] text-white/55">
+    {typeof g.requiresLevel === "number"
+      ? `Locked until level ${g.requiresLevel}.`
+      : "Open → choose a mode inside the game."}
   </div>
 </>
 
-                {g.locked ? (
+                 {typeof g.requiresLevel === "number" ? (
                   <div className="mt-3">
-                    <LockPill level={g.locked.level} />
+                    <LockPill level={g.requiresLevel} />
                   </div>
                 ) : null}
               </div>
@@ -135,7 +98,7 @@ export default function GamesPage() {
               {isLocked ? (
                 <div className="absolute inset-0 grid place-items-center bg-black/35 backdrop-blur-[1px]">
                   <div className="rounded-3xl border border-white/15 bg-black/30 px-4 py-3">
-                    <LockPill level={g.locked!.level} />
+                 <LockPill level={g.requiresLevel!} />
                   </div>
                 </div>
               ) : null}
@@ -152,7 +115,11 @@ export default function GamesPage() {
           }
 
 return (
-  <Link key={g.id} href={g.href} className="block">
+  <Link
+    key={g.id}
+    href={g.routes?.modesHref || g.href}
+    className="block"
+  >
     {CardInner}
   </Link>
 );
